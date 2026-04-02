@@ -1,16 +1,18 @@
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDropEvent
+from typing import Dict, List
+
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QDropEvent, Qt
 from PySide6.QtWidgets import (
    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-   QListWidget, QListWidgetItem, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+   QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from pmm_models import Mod
 
 
-# ── Multi-item drag-drop list ─────────────────────────────────────────────────
+# ── Multi-item drag-drop tree (active list) ───────────────────────────────────
 
-class _MultiDragList(QListWidget):
+class _MultiDragList(QTreeWidget):
    """
    QListWidget subclass that supports dragging multiple selected items at once
    while preserving their relative order.
@@ -25,49 +27,69 @@ class _MultiDragList(QListWidget):
 
    def __init__(self, parent=None) -> None:
       super().__init__(parent)
+      self.setColumnCount(2)
+      # Column 0: tiny index column, fixed minimal width
+      # Column 1: main mod label, stretches
+      header = self.header()
+      header.setStretchLastSection(False)
+      header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+      header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+      header.resizeSection(0, 28)  # tiny index column
+      header.setVisible(False)     # hide header; we just want the column
+
       self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
       self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
       self.setDefaultDropAction(Qt.DropAction.MoveAction)
       self.setDragEnabled(True)
       self.setAcceptDrops(True)
+      self.setRootIsDecorated(False)
 
-   def dropEvent(self, event: QDropEvent) -> None:  # type: ignore[override]
-      selected_rows = sorted(self.row(it) for it in self.selectedItems())
+   def dropEvent(self, event: QDropEvent) -> None:
+      selected_rows = sorted(
+         self.indexOfTopLevelItem(it) for it in self.selectedItems()
+      )
       if not selected_rows:
          event.ignore()
          return
 
-      # Snapshot item data before any removal
-      snapshots = [_snapshot(self.item(r)) for r in selected_rows]
+      snapshots = []
+      for r in selected_rows:
+         tlir = self.topLevelItem(r)
+         if tlir is not None:
+            snapshots.append(_snapshot(tlir))
 
-      # Determine insertion row from the drop position
       target = self._target_row(event.position().toPoint())
 
-      # Remove from bottom to top so indices stay valid
       for row in reversed(selected_rows):
-         self.takeItem(row)
+         self.takeTopLevelItem(row)
 
-      # The target row shifts down by the number of removed rows above it
       rows_above = sum(1 for r in selected_rows if r < target)
-      insert_at = max(0, min(target - rows_above, self.count()))
+      insert_at = max(0, min(target - rows_above, self.topLevelItemCount()))
 
-      # Re-insert in original relative order and re-select them
       for offset, snap in enumerate(snapshots):
          new_item = _restore(snap)
-         self.insertItem(insert_at + offset, new_item)
+         self.insertTopLevelItem(insert_at + offset, new_item)
          new_item.setSelected(True)
 
       event.setDropAction(Qt.DropAction.IgnoreAction)
       event.accept()
+      self._renumber()
       self.items_reordered.emit()
 
    def _target_row(self, pos) -> int:
       """Return the insertion row for a drop at pixel position `pos`."""
       index = self.indexAt(pos)
       if not index.isValid():
-         return self.count()
+         return self.topLevelItemCount()
       rect = self.visualRect(index)
       return index.row() + (1 if pos.y() >= rect.center().y() else 0)
+
+   def _renumber(self) -> None:
+      """Update the left index column to show 1-based load order."""
+      for row in range(self.topLevelItemCount()):
+         it = self.topLevelItem(row)
+         if it is not None:
+            it.setText(0, str(row + 1))
 
 
 # ── ModListWidget ─────────────────────────────────────────────────────────────
@@ -163,7 +185,7 @@ class ModListWidget(QWidget):
 
    # ── public API ────────────────────────────────────────────────────────────
 
-   def load_mods(self, mods: list[Mod], ordered_ids: list[str]) -> None:
+   def load_mods(self, mods: List[Mod], ordered_ids: List[str]) -> None:
       self._mods = {m.id: m for m in mods}
       active_set = set(ordered_ids)
 
@@ -175,13 +197,16 @@ class ModListWidget(QWidget):
       # fill active and available in a single pass
       for mod in mods:
          if mod.id in active_set:
-            self._active.addItem(_make_active_item(mod, checked=True))
+            self._active.addTopLevelItem(_make_active_item(mod, checked=True))
          else:
             self._avail.addTopLevelItem(_make_avail_item(mod, checked=False))
 
       self._loading = False
       # apply filter once (updates labels as a side effect)
       self._apply_filter(self._search.text())
+
+      # Renumber active items after initial load
+      self._active._renumber()
 
       # After population, lock the Supported column width and let Mod stretch
       header = self._avail.header()
@@ -190,11 +215,12 @@ class ModListWidget(QWidget):
       header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
       header.resizeSection(1, supported_width)
 
-   def current_order(self) -> list[str]:
-      return [
-         self._active.item(i).data(Qt.ItemDataRole.UserRole)
-         for i in range(self._active.count())
-      ]
+   def current_order(self) -> List[str]:
+      returnList: List[str] = []
+      for i in range(self._active.topLevelItemCount()):
+         if (tlii := self._active.topLevelItem(i)) is not None:
+            returnList.append(tlii.data(1, Qt.ItemDataRole.UserRole))
+      return returnList
 
    def set_active_enabled(self, enabled: bool) -> None:
       self._collection_active = enabled
@@ -204,10 +230,12 @@ class ModListWidget(QWidget):
 
    # ── itemChanged handlers ──────────────────────────────────────────────────
 
-   def _on_avail_changed(self, item) -> None:
+   def _on_avail_changed(self, item: QTreeWidgetItem, column: int) -> None:
       """Checking in the available list moves item(s) to the active playset."""
       # item is a QTreeWidgetItem
       if self._loading or not self._collection_active:
+         return
+      if column != 0:
          return
       if item.checkState(0) != Qt.CheckState.Checked:
          return
@@ -227,57 +255,73 @@ class ModListWidget(QWidget):
          idx = self._avail.indexOfTopLevelItem(it)
          if idx >= 0:
             self._avail.takeTopLevelItem(idx)
-         self._active.addItem(_make_active_item(self._mods[mid], checked=True))
+         self._active.addTopLevelItem(
+            _make_active_item(self._mods[mid], checked=True)
+         )
 
+      self._active._renumber()
       self._update_labels()
       self._emit_order()
 
-   def _on_active_changed(self, item: QListWidgetItem) -> None:
+   def _on_active_changed(self, item: QTreeWidgetItem, column: int) -> None:
       """Unchecking in the active playset moves the item back to available."""
       if self._loading:
          return
-      if item.checkState() != Qt.CheckState.Unchecked:
+      if column != 1:
+         return
+      if item.checkState(1) != Qt.CheckState.Unchecked:
          return
 
-      mid = item.data(Qt.ItemDataRole.UserRole)
+      mid = item.data(1, Qt.ItemDataRole.UserRole)
       if mid not in self._mods:
          return
 
-      row = self._active.row(item)
+      row = self._active.indexOfTopLevelItem(item)
       if row >= 0:
-         self._active.takeItem(row)
+         self._active.takeTopLevelItem(row)
       self._avail.addTopLevelItem(_make_avail_item(self._mods[mid], checked=False))
 
+      self._active._renumber()
       self._update_labels()
       self._emit_order()
 
    # ── ▲/▼ reorder — multi-selection aware ──────────────────────────────────
 
    def _move_up(self) -> None:
-      rows = sorted(self._active.row(it) for it in self._active.selectedItems())
+      rows = sorted(
+         self._active.indexOfTopLevelItem(it)
+         for it in self._active.selectedItems()
+      )
       if not rows or rows[0] == 0:
          return
       self._loading = True
       for row in rows:  # top-to-bottom: each moves up by 1
-         item = self._active.takeItem(row)
-         self._active.insertItem(row - 1, item)
-         self._active.item(row - 1).setSelected(True)
+         item = self._active.takeTopLevelItem(row)
+         if item is None:
+            continue
+         self._active.insertTopLevelItem(row - 1, item)
+         item.setSelected(True)
       self._loading = False
+      self._active._renumber()
       self._emit_order()
 
    def _move_down(self) -> None:
       rows = sorted(
-         (self._active.row(it) for it in self._active.selectedItems()),
+         (self._active.indexOfTopLevelItem(it)
+          for it in self._active.selectedItems()),
          reverse=True,
       )
-      if not rows or rows[0] == self._active.count() - 1:
+      if not rows or rows[0] == self._active.topLevelItemCount() - 1:
          return
       self._loading = True
       for row in rows:  # bottom-to-top: each moves down by 1
-         item = self._active.takeItem(row)
-         self._active.insertItem(row + 1, item)
-         self._active.item(row + 1).setSelected(True)
+         item = self._active.takeTopLevelItem(row)
+         if item is None:
+            continue
+         self._active.insertTopLevelItem(row + 1, item)
+         item.setSelected(True)
       self._loading = False
+      self._active._renumber()
       self._emit_order()
 
    # ── filter ────────────────────────────────────────────────────────────────
@@ -315,23 +359,30 @@ class ModListWidget(QWidget):
 
 # ── item helpers ──────────────────────────────────────────────────────────────
 
-def _make_active_item(mod: Mod, checked: bool) -> QListWidgetItem:
+def _make_active_item(mod: Mod, checked: bool) -> QTreeWidgetItem:
    """
-   Create a QListWidgetItem for the active-playset list (single column).
-
-   The label still includes the supported version for quick reference.
+   Create a QTreeWidgetItem for the active-playset tree (two columns):
+     column 0: order number (1-based; filled/updated by _renumber)
+     column 1: mod label with checkbox
    """
    label = f"{mod.name}  [{mod.supported_version}]" if mod.supported_version else mod.name
-   item = QListWidgetItem(label)
-   item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-   item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-   item.setData(Qt.ItemDataRole.UserRole, mod.id)
-   item.setToolTip(
+   item = QTreeWidgetItem(["", label])
+   item.setFlags(
+      item.flags()
+      | Qt.ItemFlag.ItemIsUserCheckable
+      | Qt.ItemFlag.ItemIsSelectable
+      | Qt.ItemFlag.ItemIsEnabled
+   )
+   item.setCheckState(1, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+   item.setData(1, Qt.ItemDataRole.UserRole, mod.id)
+   tooltip = (
       f"ID: {mod.id}\n"
       f"Version: {mod.version or '—'}\n"
       f"Supported: {mod.supported_version or '—'}\n"
       f"Path: {mod.path}"
    )
+   item.setToolTip(0, tooltip)
+   item.setToolTip(1, tooltip)
    return item
 
 
@@ -359,22 +410,23 @@ def _make_avail_item(mod: Mod, checked: bool) -> QTreeWidgetItem:
    return item
 
 
-def _snapshot(item: QListWidgetItem) -> dict:
-   """Capture all displayable state of an item before takeItem() destroys it."""
+def _snapshot(item: QTreeWidgetItem) -> Dict:
+   """Capture all displayable state of an item before takeTopLevelItem() destroys it."""
    return {
-      "text": item.text(),
-      "data": item.data(Qt.ItemDataRole.UserRole),
+      "texts": [item.text(0), item.text(1)],
+      "data": item.data(1, Qt.ItemDataRole.UserRole),
       "flags": item.flags(),
-      "check": item.checkState(),
-      "tooltip": item.toolTip(),
+      "check": item.checkState(1),
+      "tooltips": [item.toolTip(0), item.toolTip(1)],
    }
 
 
-def _restore(snap: dict) -> QListWidgetItem:
-   """Reconstruct a QListWidgetItem from a snapshot."""
-   item = QListWidgetItem(snap["text"])
+def _restore(snap: Dict) -> QTreeWidgetItem:
+   """Reconstruct a QTreeWidgetItem from a snapshot."""
+   item = QTreeWidgetItem(snap["texts"])
    item.setFlags(snap["flags"])
-   item.setCheckState(snap["check"])
-   item.setData(Qt.ItemDataRole.UserRole, snap["data"])
-   item.setToolTip(snap["tooltip"])
+   item.setCheckState(1, snap["check"])
+   item.setData(1, Qt.ItemDataRole.UserRole, snap["data"])
+   item.setToolTip(0, snap["tooltips"][0])
+   item.setToolTip(1, snap["tooltips"][1])
    return item
