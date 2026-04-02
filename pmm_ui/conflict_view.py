@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
@@ -8,6 +10,20 @@ from PySide6.QtWidgets import (
 import pmm_services
 from pmm_models import Mod
 from pmm_services import DefinitionDiff
+
+
+@dataclass(frozen=True)
+class _FileNodeData:
+   kind: str  # "file"
+   rel_path: str
+   owners: list[Mod]
+
+
+@dataclass(frozen=True)
+class _ModNodeData:
+   kind: str  # "mod"
+   rel_path: str
+   mod: Mod
 
 
 class ConflictView(QWidget):
@@ -76,10 +92,10 @@ class ConflictView(QWidget):
       for rel_path, owners in sorted(self._conflicts.items()):
          top = QTreeWidgetItem([rel_path, f"{len(owners)} mods"])
          top.setForeground(0, Qt.GlobalColor.red)
-         top.setData(0, Qt.ItemDataRole.UserRole, ("file", rel_path, owners))
+         top.setData(0, Qt.ItemDataRole.UserRole, _FileNodeData("file", rel_path, owners))
          for mod in owners:
-            child = QTreeWidgetItem(["  " + mod.name, ""])
-            child.setData(0, Qt.ItemDataRole.UserRole, ("mod", rel_path, mod))
+            child = QTreeWidgetItem([f"  {mod.name}", ""])
+            child.setData(0, Qt.ItemDataRole.UserRole, _ModNodeData("mod", rel_path, mod))
             top.addChild(child)
          self._tree.addTopLevelItem(top)
 
@@ -91,21 +107,21 @@ class ConflictView(QWidget):
       items = self._tree.selectedItems()
       if not items:
          return
+
       data = items[0].data(0, Qt.ItemDataRole.UserRole)
       if data is None:
          return
 
-      kind, rel_path = data[0], data[1]
-
-      if kind == "file":
-         owners: list[Mod] = data[2]
-         self._show_diff_for_owners(rel_path, owners)
-      elif kind == "mod":
-         owners = self._conflicts.get(rel_path, [])
-         clicked: Mod = data[2]
+      # Typed node payloads improve readability over raw tuples.
+      if isinstance(data, _FileNodeData) and data.kind == "file":
+         self._show_diff_for_owners(data.rel_path, data.owners)
+      elif isinstance(data, _ModNodeData) and data.kind == "mod":
+         owners = self._conflicts.get(data.rel_path, [])
+         clicked = data.mod
          others = [m for m in owners if m is not clicked]
          if others:
-            self._show_diff_for_owners(rel_path, [others[0], clicked])
+            # For now show the first other mod vs the clicked one.
+            self._show_diff_for_owners(data.rel_path, [others[0], clicked])
 
    # ── diff panel ────────────────────────────────────────────────────────────
 
@@ -139,6 +155,18 @@ class _DiffTab(QWidget):
      Top    – structural (definition-level) diff tree from pmm_clausewitz
      Bottom – raw unified diff, or definition diff when a row is selected
    """
+
+   # status → human label and color; reused across instances
+   _STATUS_LABEL = {
+      "changed": "changed",
+      "only_in_a": "only in {a}",
+      "only_in_b": "only in {b}",
+   }
+   _STATUS_COLOR = {
+      "changed": QColor("#e0a020"),
+      "only_in_a": QColor("#e07070"),
+      "only_in_b": QColor("#70b870"),
+   }
 
    def __init__(self, rel_path: str, mod_a: Mod, mod_b: Mod, parent=None) -> None:
       super().__init__(parent)
@@ -182,33 +210,34 @@ class _DiffTab(QWidget):
       self._populate()
 
    def _populate(self) -> None:
-      _STATUS_LABEL = {
-         "changed": "changed",
-         "only_in_a": f"only in {self._mod_a.name}",
-         "only_in_b": f"only in {self._mod_b.name}",
-      }
-      _STATUS_COLOR = {
-         "changed": QColor("#e0a020"),
-         "only_in_a": QColor("#e07070"),
-         "only_in_b": QColor("#70b870"),
-      }
-
+      """Fill the definition tree and unified diff for this file/mod pair."""
       diffs = pmm_services.get_definition_diffs(
          self._rel_path, self._mod_a, self._mod_b
       )
-      for dd in diffs:
-         item = QTreeWidgetItem([dd.def_id, _STATUS_LABEL.get(dd.status, dd.status)])
-         item.setForeground(1, _STATUS_COLOR.get(dd.status, QColor("#aaa")))
-         item.setData(0, Qt.ItemDataRole.UserRole, dd)
-         self._def_tree.addTopLevelItem(item)
 
-      if not diffs:
-         QTreeWidgetItem(self._def_tree, ["(no definition-level differences)", ""])
+      if diffs:
+         a_name = self._mod_a.name
+         b_name = self._mod_b.name
+         for dd in diffs:
+            label_template = self._STATUS_LABEL.get(dd.status, dd.status)
+            status_label = label_template.format(a=a_name, b=b_name)
+            item = QTreeWidgetItem([dd.def_id, status_label])
+            item.setForeground(1, self._STATUS_COLOR.get(dd.status, QColor("#aaa")))
+            item.setData(0, Qt.ItemDataRole.UserRole, dd)
+            self._def_tree.addTopLevelItem(item)
+      else:
+         QTreeWidgetItem(
+            self._def_tree,
+            ["(no definition-level differences)", ""],
+         )
 
       diff_text = pmm_services.get_unified_diff(
          self._rel_path, self._mod_a, self._mod_b
       )
-      _render_diff(self._unified_edit, diff_text or "(files are identical or one is missing)")
+      _render_diff(
+         self._unified_edit,
+         diff_text or "(files are identical or one is missing)",
+      )
 
    def _on_def_selected(self) -> None:
       items = self._def_tree.selectedItems()

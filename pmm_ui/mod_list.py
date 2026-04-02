@@ -283,17 +283,17 @@ class ModListWidget(QWidget):
    # ── filter ────────────────────────────────────────────────────────────────
 
    def _apply_filter(self, text: str) -> None:
+      """Filter available mods by case-insensitive substring match on the name."""
       needle = text.strip().lower()
-      if not needle:
-         for i in range(self._avail.topLevelItemCount()):
-            it = self._avail.topLevelItem(i)
-            if it:
-               it.setHidden(False)
-      else:
-         for i in range(self._avail.topLevelItemCount()):
-            it = self._avail.topLevelItem(i)
-            if it:
-               it.setHidden(needle not in it.text(0).lower())
+      count = self._avail.topLevelItemCount()
+      for i in range(count):
+         it = self._avail.topLevelItem(i)
+         if it is None:
+            continue
+         if not needle:
+            it.setHidden(False)
+         else:
+            it.setHidden(needle not in it.text(0).lower())
       self._update_labels()
 
    # ── helpers ───────────────────────────────────────────────────────────────
@@ -302,11 +302,15 @@ class ModListWidget(QWidget):
       self.order_changed.emit(self.current_order())
 
    def _update_labels(self) -> None:
+      """Update the available-mods label with the number of visible entries."""
       visible = 0
       for i in range(self._avail.topLevelItemCount()):
          it = self._avail.topLevelItem(i)
-         if it and not it.isHidden():
+         if it is not None and not it.isHidden():
             visible += 1
+
+      # "Available mods (N)" – keep base label text stable for translations later.
+      self._avail_label.setText(f"Available mods ({visible})")
 
 
 # ── item helpers ──────────────────────────────────────────────────────────────

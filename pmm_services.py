@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from pmm_clausewitz import CWPair
 from pmm_models import Mod, ModCollection
 
 
@@ -111,28 +112,36 @@ def get_definition_diffs(rel_path: str, mod_a: Mod, mod_b: Mod) -> list[Definiti
             text_b=f"(binary file in {mod_b.name})",
         )]
 
-    defs_a: dict = {}
-    defs_b: dict = {}
+    defs_a: dict[str, CWPair] = {}
+    defs_b: dict[str, CWPair] = {}
     path_a = mod_a.path / rel_path
     path_b = mod_b.path / rel_path
 
-    for path, target in ((path_a, defs_a), (path_b, defs_b)):
-        if path.is_file():
-            with contextlib.suppress(Exception):
-                text = path.read_text(encoding="utf-8-sig", errors="replace")
-                target.update(parse_text(text, path).definitions())
+    def _load_defs(path: Path, target: dict[str, object]) -> None:
+       if not path.is_file():
+          return
+       with contextlib.suppress(Exception):
+          text = path.read_text(encoding="utf-8-sig", errors="replace")
+          target.update(parse_text(text, path).definitions())
+
+    _load_defs(path_a, defs_a)
+    _load_defs(path_b, defs_b)
+
     result: list[DefinitionDiff] = []
-    for key in sorted(set(defs_a) | set(defs_b)):
-        ta = unparse_pair(defs_a[key]) if key in defs_a else ""
-        tb = unparse_pair(defs_b[key]) if key in defs_b else ""
-        if ta == tb:
-            continue
-        if key not in defs_a:
-            status = "only_in_b"
-        elif key not in defs_b:
-            status = "only_in_a"
-        else:
-            status = "changed"
-        result.append(DefinitionDiff(def_id=key, status=status, text_a=ta, text_b=tb))
+    all_keys = sorted(set(defs_a) | set(defs_b))
+    for key in all_keys:
+       pair_a = defs_a.get(key)
+       pair_b = defs_b.get(key)
+       ta = unparse_pair(pair_a) if pair_a is not None else ""
+       tb = unparse_pair(pair_b) if pair_b is not None else ""
+       if ta == tb:
+          continue
+       if pair_a is None:
+          status = "only_in_b"
+       elif pair_b is None:
+          status = "only_in_a"
+       else:
+          status = "changed"
+       result.append(DefinitionDiff(def_id=key, status=status, text_a=ta, text_b=tb))
 
     return result
