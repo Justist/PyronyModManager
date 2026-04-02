@@ -170,17 +170,17 @@ class ModListWidget(QWidget):
       self._loading = True
 
       self._active.clear()
-      for mid in ordered_ids:
-         if mid in self._mods:
-            self._active.addItem(_make_active_item(self._mods[mid], checked=True))
-
       self._avail.clear()
+
+      # fill active and available in a single pass
       for mod in mods:
-         if mod.id not in active_set:
+         if mod.id in active_set:
+            self._active.addItem(_make_active_item(mod, checked=True))
+         else:
             self._avail.addTopLevelItem(_make_avail_item(mod, checked=False))
 
       self._loading = False
-      self._update_labels()
+      # apply filter once (updates labels as a side effect)
       self._apply_filter(self._search.text())
 
       # After population, lock the Supported column width and let Mod stretch
@@ -284,12 +284,16 @@ class ModListWidget(QWidget):
 
    def _apply_filter(self, text: str) -> None:
       needle = text.strip().lower()
-      for i in range(self._avail.topLevelItemCount()):
-         it = self._avail.topLevelItem(i)
-         if not it:
-            continue
-         name = it.text(0).lower()
-         it.setHidden(bool(needle and needle not in name))
+      if not needle:
+         for i in range(self._avail.topLevelItemCount()):
+            it = self._avail.topLevelItem(i)
+            if it:
+               it.setHidden(False)
+      else:
+         for i in range(self._avail.topLevelItemCount()):
+            it = self._avail.topLevelItem(i)
+            if it:
+               it.setHidden(needle not in it.text(0).lower())
       self._update_labels()
 
    # ── helpers ───────────────────────────────────────────────────────────────
@@ -298,12 +302,11 @@ class ModListWidget(QWidget):
       self.order_changed.emit(self.current_order())
 
    def _update_labels(self) -> None:
-      visible = sum(
-         1 for i in range(self._avail.topLevelItemCount())
-         if self._avail.topLevelItem(i) and not self._avail.topLevelItem(i).isHidden()
-      )
-      self._avail_label.setText(f"Available mods  ({visible})")
-      self._active_label.setText(f"Active playset  ({self._active.count()})")
+      visible = 0
+      for i in range(self._avail.topLevelItemCount()):
+         it = self._avail.topLevelItem(i)
+         if it and not it.isHidden():
+            visible += 1
 
 
 # ── item helpers ──────────────────────────────────────────────────────────────
