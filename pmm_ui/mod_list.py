@@ -2,7 +2,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import (
    QAbstractItemView, QHBoxLayout, QLabel, QLineEdit,
-   QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
+   QListWidget, QListWidgetItem, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from pmm_models import Mod
@@ -104,10 +104,14 @@ class ModListWidget(QWidget):
       self._search.setPlaceholderText("Filter available mods…")
       self._search.textChanged.connect(self._apply_filter)
 
-      self._avail = QListWidget()
+      self._avail = QTreeWidget()
+      self._avail.setColumnCount(2)
+      self._avail.setHeaderLabels(["Mod", "Supported"])
       self._avail.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
       self._avail.setSortingEnabled(True)
       self._avail.itemChanged.connect(self._on_avail_changed)
+      # sort by Supported version column by default
+      self._avail.sortItems(1, Qt.SortOrder.DescendingOrder)
 
       left_layout = QVBoxLayout()
       left_layout.setContentsMargins(0, 0, 0, 0)
@@ -161,12 +165,12 @@ class ModListWidget(QWidget):
       self._active.clear()
       for mid in ordered_ids:
          if mid in self._mods:
-            self._active.addItem(_make_item(self._mods[mid], checked=True))
+            self._active.addItem(_make_active_item(self._mods[mid], checked=True))
 
       self._avail.clear()
       for mod in mods:
          if mod.id not in active_set:
-            self._avail.addItem(_make_item(mod, checked=False))
+            self._avail.addTopLevelItem(_make_avail_item(mod, checked=False))
 
       self._loading = False
       self._update_labels()
@@ -186,11 +190,12 @@ class ModListWidget(QWidget):
 
    # ── itemChanged handlers ──────────────────────────────────────────────────
 
-   def _on_avail_changed(self, item: QListWidgetItem) -> None:
+   def _on_avail_changed(self, item) -> None:
       """Checking in the available list moves item(s) to the active playset."""
+      # item is a QTreeWidgetItem
       if self._loading or not self._collection_active:
          return
-      if item.checkState() != Qt.CheckState.Checked:
+      if item.checkState(0) != Qt.CheckState.Checked:
          return
 
       selected = self._avail.selectedItems()
@@ -198,17 +203,17 @@ class ModListWidget(QWidget):
 
       self._loading = True
       for it in to_move:
-         it.setCheckState(Qt.CheckState.Checked)
+         it.setCheckState(0, Qt.CheckState.Checked)
       self._loading = False
 
       for it in to_move:
-         mid = it.data(Qt.ItemDataRole.UserRole)
+         mid = it.data(0, Qt.ItemDataRole.UserRole)
          if mid not in self._mods:
             continue
-         row = self._avail.row(it)
-         if row >= 0:
-            self._avail.takeItem(row)
-         self._active.addItem(_make_item(self._mods[mid], checked=True))
+         idx = self._avail.indexOfTopLevelItem(it)
+         if idx >= 0:
+            self._avail.takeTopLevelItem(idx)
+         self._active.addItem(_make_active_item(self._mods[mid], checked=True))
 
       self._update_labels()
       self._emit_order()
@@ -227,7 +232,7 @@ class ModListWidget(QWidget):
       row = self._active.row(item)
       if row >= 0:
          self._active.takeItem(row)
-      self._avail.addItem(_make_item(self._mods[mid], checked=False))
+      self._avail.addTopLevelItem(_make_avail_item(self._mods[mid], checked=False))
 
       self._update_labels()
       self._emit_order()
@@ -265,9 +270,12 @@ class ModListWidget(QWidget):
 
    def _apply_filter(self, text: str) -> None:
       needle = text.strip().lower()
-      for i in range(self._avail.count()):
-         it = self._avail.item(i)
-         it.setHidden(bool(needle and needle not in it.text().lower()))
+      for i in range(self._avail.topLevelItemCount()):
+         it = self._avail.topLevelItem(i)
+         if not it:
+            continue
+         name = it.text(0).lower()
+         it.setHidden(bool(needle and needle not in name))
       self._update_labels()
 
    # ── helpers ───────────────────────────────────────────────────────────────
@@ -277,8 +285,8 @@ class ModListWidget(QWidget):
 
    def _update_labels(self) -> None:
       visible = sum(
-         1 for i in range(self._avail.count())
-         if not self._avail.item(i).isHidden()
+         1 for i in range(self._avail.topLevelItemCount())
+         if self._avail.topLevelItem(i) and not self._avail.topLevelItem(i).isHidden()
       )
       self._avail_label.setText(f"Available mods  ({visible})")
       self._active_label.setText(f"Active playset  ({self._active.count()})")
@@ -286,8 +294,13 @@ class ModListWidget(QWidget):
 
 # ── item helpers ──────────────────────────────────────────────────────────────
 
-def _make_item(mod: Mod, checked: bool) -> QListWidgetItem:
-   label = f"{mod.name}  [{mod.supported_version}]"
+def _make_active_item(mod: Mod, checked: bool) -> QListWidgetItem:
+   """
+   Create a QListWidgetItem for the active-playset list (single column).
+
+   The label still includes the supported version for quick reference.
+   """
+   label = f"{mod.name}  [{mod.supported_version}]" if mod.supported_version else mod.name
    item = QListWidgetItem(label)
    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
    item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
@@ -298,6 +311,30 @@ def _make_item(mod: Mod, checked: bool) -> QListWidgetItem:
       f"Supported: {mod.supported_version or '—'}\n"
       f"Path: {mod.path}"
    )
+   return item
+
+
+def _make_avail_item(mod: Mod, checked: bool) -> QTreeWidgetItem:
+   """
+   Create a QTreeWidgetItem for the available-mods list (two columns):
+     column 0: mod name (with checkbox)
+     column 1: supported version (or empty string)
+   """
+   version = mod.supported_version or ""
+   item = QTreeWidgetItem([mod.name, version])
+   # Enable user checkability only on the first column
+   item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+   item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+   item.setData(0, Qt.ItemDataRole.UserRole, mod.id)
+   item.setToolTip(
+      0,
+      f"ID: {mod.id}\n"
+      f"Version: {mod.version or '—'}\n"
+      f"Supported: {mod.supported_version or '—'}\n"
+      f"Path: {mod.path}"
+   )
+   # Mirror tooltip on second column for convenience
+   item.setToolTip(1, item.toolTip(0))
    return item
 
 
