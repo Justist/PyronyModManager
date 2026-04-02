@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import (
-   QAbstractItemView, QHBoxLayout, QLabel, QLineEdit,
+   QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
    QListWidget, QListWidgetItem, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -113,6 +113,13 @@ class ModListWidget(QWidget):
       # sort by Supported version column by default
       self._avail.sortItems(1, Qt.SortOrder.DescendingOrder)
 
+      # Column sizing: give "Supported" only the space it needs, let "Mod" take the rest
+      header = self._avail.header()
+      header.setStretchLastSection(False)
+      # initial size based on contents; will be refined after items are added
+      header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+      header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+
       left_layout = QVBoxLayout()
       left_layout.setContentsMargins(0, 0, 0, 0)
       left_layout.addWidget(self._avail_label)
@@ -175,6 +182,13 @@ class ModListWidget(QWidget):
       self._loading = False
       self._update_labels()
       self._apply_filter(self._search.text())
+
+      # After population, lock the Supported column width and let Mod stretch
+      header = self._avail.header()
+      supported_width = header.sectionSize(1)
+      header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+      header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+      header.resizeSection(1, supported_width)
 
    def current_order(self) -> list[str]:
       return [
