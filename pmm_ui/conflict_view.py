@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
-   QLabel, QPushButton, QSplitter, QTabWidget, QTextEdit,
+   QLabel, QPushButton, QProgressBar, QSplitter, QTabWidget, QTextEdit,
    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -34,6 +34,12 @@ class ConflictView(QWidget):
       scan_btn = QPushButton("🔄  Scan for conflicts")
       scan_btn.clicked.connect(self._scan)
 
+      # tiny loading bar shown while scanning for conflicts
+      self._progress = QProgressBar()
+      self._progress.setMaximumHeight(10)
+      self._progress.setRange(0, 0)  # indeterminate
+      self._progress.hide()
+
       self._tree = QTreeWidget()
       self._tree.setHeaderLabels(["File / Mod", "Info"])
       self._tree.setColumnWidth(0, 360)
@@ -43,6 +49,7 @@ class ConflictView(QWidget):
       ll = QVBoxLayout(left)
       ll.setContentsMargins(0, 0, 4, 0)
       ll.addWidget(scan_btn)
+      ll.addWidget(self._progress)
       ll.addWidget(self._tree)
 
       # ── right panel: tabbed diff views ───────────────────────────────────
@@ -83,7 +90,15 @@ class ConflictView(QWidget):
    def _scan(self) -> None:
       self._tree.clear()
       self._clear_diff_panel()
-      self._conflicts = pmm_services.detect_file_conflicts(self._mods)
+
+      # show tiny loading bar while scanning
+      self._progress.show()
+      self._progress.repaint()  # ensure immediate visual update
+
+      try:
+         self._conflicts = pmm_services.detect_file_conflicts(self._mods)
+      finally:
+         self._progress.hide()
 
       if not self._conflicts:
          QTreeWidgetItem(self._tree, ["✓  No conflicts found", ""])

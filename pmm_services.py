@@ -18,19 +18,50 @@ def resolve_load_order(mods: list[Mod], collection: ModCollection) -> list[Mod]:
 
 
 def detect_file_conflicts(mods: list[Mod]) -> dict[str, list[Mod]]:
-    """
-    Walk each mod's directory and map relative_path → [mods that provide it].
-    Returns only paths present in more than one mod.
-    """
-    file_owners: dict[str, list[Mod]] = defaultdict(list)
-    for mod in mods:
-        if not mod.path.is_dir():
+   """
+   Walk each mod's directory and map relative_path → [mods that provide it].
+
+   Ignores:
+     * any directory whose name starts with a dot (".git", ".idea", …)
+     * the top-level "descriptor.mod" file
+     * (for now) common binary/image files (.png, .dds, .jpg, .jpeg, .tga, .bmp, .gif, .webp)
+
+   Returns only paths present in more than one mod.
+   """
+   # Extensions treated as binary/image and skipped from conflict detection
+   skip_exts = {
+      ".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".webp", ".wav"
+   }
+
+   file_owners: dict[str, list[Mod]] = defaultdict(list)
+
+   for mod in mods:
+      root = mod.path
+      if not root.is_dir():
+         continue
+
+      for f in root.rglob("*"):
+         # Skip any path that has a dot-folder in its parents
+         if any(part.startswith(".") for part in f.relative_to(root).parts):
             continue
-        for f in mod.path.rglob("*"):
-            if f.is_file():
-                rel = str(f.relative_to(mod.path))
-                file_owners[rel].append(mod)
-    return {k: v for k, v in file_owners.items() if len(v) > 1}
+
+         if not f.is_file():
+            continue
+
+         rel_path = f.relative_to(root)
+
+         # Skip the top-level descriptor.mod file
+         if rel_path == Path("descriptor.mod"):
+            continue
+
+         # Skip image/binary extensions
+         if f.suffix.lower() in skip_exts:
+            continue
+
+         rel = str(rel_path)
+         file_owners[rel].append(mod)
+
+   return {k: v for k, v in file_owners.items() if len(v) > 1}
 
 
 def apply_load_order_to_launcher(
