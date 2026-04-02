@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import Any, Dict, List
 
 from pmm_models import Mod
 
@@ -7,8 +8,8 @@ from pmm_models import Mod
 _KV = re.compile(r'^(\w+)\s*=\s*(?:"([^"]*)"|{([^}]*)}|(\S+))', re.MULTILINE)
 
 
-def _parse_block(text: str) -> dict:
-   result: dict = {}
+def _parse_block(text: str) -> Dict[str, Any]:
+   result: Dict[str, Any] = {}
    for m in _KV.finditer(text):
       key = m.group(1)
       if m.group(2) is not None:  # quoted string
@@ -40,6 +41,6 @@ def parse_descriptor(path: Path) -> Mod:
    )
 
 
-def discover_mods(mod_dir: Path) -> list[Mod]:
+def discover_mods(mod_dir: Path) -> List[Mod]:
    """Scan a directory for *.mod descriptor files and return parsed Mods."""
    return [parse_descriptor(p) for p in sorted(mod_dir.glob("*.mod"))]

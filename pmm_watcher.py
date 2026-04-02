@@ -12,7 +12,7 @@ class ModWatcher(QThread):
    deleted, or modified.  Call stop() before destroying the object.
    """
 
-   mods_changed = Signal()
+   mods_changed: Signal = Signal()
 
    def __init__(self, path: Path, parent=None) -> None:
       super().__init__(parent)

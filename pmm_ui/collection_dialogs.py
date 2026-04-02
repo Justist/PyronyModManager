@@ -1,3 +1,5 @@
+from typing import Any, Set
+
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout
 
 
@@ -13,16 +15,16 @@ class CollectionNameDialog(QDialog):
     def __init__(
         self,
         title: str,
-        existing_names: set[str],
+        existing_names: Set[str],
         initial: str = "",
-        parent=None,
+        parent: Any = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(340)
 
         # On rename the current name is not a duplicate of itself.
-        self._forbidden: set[str] = existing_names - {initial}
+        self._forbidden: Set[str] = existing_names - {initial}
 
         self._edit = QLineEdit(initial)
         self._edit.selectAll()

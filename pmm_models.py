@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Dict, List
 
 
 @dataclass
@@ -11,8 +12,8 @@ class Mod:
    order: int = 0
    version: str = ""
    supported_version: str = ""
-   tags: list[str] = field(default_factory=list)
-   dependencies: list[str] = field(default_factory=list)
+   tags: List[str] = field(default_factory=list)
+   dependencies: List[str] = field(default_factory=list)
    remote_id: str = ""
 
    @property
@@ -24,7 +25,7 @@ class Mod:
 class ModCollection:
    name: str
    game_id: str
-   mods: list[str] = field(default_factory=list)
+   mods: List[str] = field(default_factory=list)
    launcher_playset_id: str = ""
 
 
@@ -45,8 +46,8 @@ class Preferences:
    language: str = "en"
    check_for_updates: bool = True
    theme: str = "dark"
-   collections: list[ModCollection] = field(default_factory=list)
+   collections: List[ModCollection] = field(default_factory=list)
    # Per-game user-data path overrides set by the Settings dialog.
    # Keys are Game.id; values are absolute path strings.
    # Missing keys fall back to the auto-detected path in pmm_games.
-   game_paths: dict[str, str] = field(default_factory=dict)
+   game_paths: Dict[str, str] = field(default_factory=dict)

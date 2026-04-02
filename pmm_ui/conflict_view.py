@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
    QLabel, QPushButton, QProgressBar, QSplitter, QTabWidget, QTextEdit,
-   QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+   QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QHeaderView,
 )
 
 import pmm_services
@@ -42,7 +42,11 @@ class ConflictView(QWidget):
 
       self._tree = QTreeWidget()
       self._tree.setHeaderLabels(["File / Mod", "Info"])
-      self._tree.setColumnWidth(0, 360)
+      # Column sizing: give "Info" only what it needs, let "File / Mod" take the rest.
+      header = self._tree.header()
+      header.setStretchLastSection(False)
+      header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+      header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
       self._tree.itemSelectionChanged.connect(self._on_selection)
 
       left = QWidget()
@@ -145,9 +149,8 @@ class ConflictView(QWidget):
       self._clear_diff_panel()
       for mod_a, mod_b in zip(owners, owners[1:]):
          tab = _DiffTab(rel_path, mod_a, mod_b)
-         a_label = mod_a.name[:14] + ("…" if len(mod_a.name) > 14 else "")
-         b_label = mod_b.name[:14] + ("…" if len(mod_b.name) > 14 else "")
-         self._diff_tabs.addTab(tab, f"{a_label} → {b_label}")
+         # Use full names so the tab text width matches the complete label.
+         self._diff_tabs.addTab(tab, f"{mod_a.name} → {mod_b.name}")
 
       self._right_placeholder.hide()
       self._diff_tabs.show()
@@ -194,7 +197,11 @@ class _DiffTab(QWidget):
       # structural diff tree
       self._def_tree = QTreeWidget()
       self._def_tree.setHeaderLabels(["Definition", "Status"])
-      self._def_tree.setColumnWidth(0, 280)
+      # Column sizing: minimal width for "Status", rest for "Definition".
+      def_header = self._def_tree.header()
+      def_header.setStretchLastSection(False)
+      def_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+      def_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
       self._def_tree.itemSelectionChanged.connect(self._on_def_selected)
 
       # bottom text area — shows full-file diff by default,

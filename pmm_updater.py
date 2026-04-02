@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Tuple
 
 from PySide6.QtCore import QThread, Signal
 
@@ -20,9 +21,9 @@ class UpdateChecker(QThread):
    Exactly one of the three signals fires after run() completes.
    """
 
-   update_available = Signal(object)  # ReleaseInfo
-   up_to_date = Signal()
-   check_failed = Signal(str)  # human-readable error
+   update_available: Signal = Signal(object)  # payload: ReleaseInfo
+   up_to_date: Signal = Signal()
+   check_failed: Signal = Signal(str)  # human-readable error
 
    def __init__(self, releases_api: str = _RELEASES_API, parent=None) -> None:
       super().__init__(parent)
@@ -52,7 +53,7 @@ class UpdateChecker(QThread):
 def _is_newer(remote: str, current: str) -> bool:
    """Return True when remote version tuple is strictly greater than current."""
 
-   def parse(v: str) -> tuple[int, ...]:
+   def parse(v: str) -> Tuple[int, ...]:
       parts = []
       for x in v.split("."):
          if x.isdigit():

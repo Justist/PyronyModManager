@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Union
+from typing import Dict, List, Union
 
 # ── AST nodes ─────────────────────────────────────────────────────────────────
 
@@ -11,7 +11,7 @@ Value = Union["CWBlock", str]
 @dataclass
 class CWBlock:
    """A { … } block; items are CWPair nodes or bare string values (list entries)."""
-   items: list[Union["CWPair", str]] = field(default_factory=list)
+   items: List[Union[CWPair, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -28,11 +28,11 @@ class CWFile:
    path: Path
    root: CWBlock
 
-   def top_pairs(self) -> list[CWPair]:
+   def top_pairs(self) -> List[CWPair]:
       """All top-level CWPair nodes (ignores bare list values)."""
       return [x for x in self.root.items if isinstance(x, CWPair)]
 
-   def definitions(self) -> dict[str, CWPair]:
+   def definitions(self) -> Dict[str, CWPair]:
       """
       Map each top-level named definition to a stable string key.
 
@@ -41,7 +41,7 @@ class CWFile:
       Plain key=value pairs at the top level use their own key.
       Last definition wins within a single file, mirroring Clausewitz.
       """
-      result: dict[str, CWPair] = {}
+      result: Dict[str, CWPair] = {}
       for pair in self.top_pairs():
          if isinstance(pair.value, CWBlock):
             inner_id = _inner_id(pair.value)
@@ -52,7 +52,7 @@ class CWFile:
       return result
 
 
-def _inner_id(block: CWBlock) -> CWBlock | str | None:
+def _inner_id(block: CWBlock) -> str | CWBlock | None:
    """Return the value of the first 'id' or 'name' key inside a block."""
    return next(
        (item.value
@@ -83,8 +83,8 @@ class _Tok:
    line: int
 
 
-def _tokenize(src: str) -> list[_Tok]:
-   toks: list[_Tok] = []
+def _tokenize(src: str) -> List[_Tok]:
+   toks: List[_Tok] = []
    line = 1
    for m in _PAT.finditer(src):
       kind = m.lastgroup
@@ -100,7 +100,7 @@ def _tokenize(src: str) -> list[_Tok]:
 class _Parser:
    __slots__ = ("_t", "_i")
 
-   def __init__(self, tokens: list[_Tok]) -> None:
+   def __init__(self, tokens: List[_Tok]) -> None:
       self._t = tokens
       self._i = 0
 

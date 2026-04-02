@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Type, TypeVar
+from typing import Any, TypeVar
 
 import msgspec
 
@@ -12,15 +12,15 @@ def _path(filename: str) -> Path:
    return _CONFIG_DIR / filename
 
 
-def save(obj: msgspec.Struct | object, filename: str) -> None:
+def save(obj: Any, filename: str) -> None:
    _path(filename).write_bytes(msgspec.json.encode(obj))
 
 
-def load(cls: Type[T], filename: str) -> T | None:
+def load(cls: type[T], filename: str) -> T | None:
    p = _path(filename)
    return msgspec.json.decode(p.read_bytes(), type=cls) if p.exists() else None
 
 
-def load_or_default(cls: Type[T], filename: str) -> T:
+def load_or_default(cls: type[T], filename: str) -> T:
    result = load(cls, filename)
-   return result if result is not None else cls()  # type: ignore
+   return result if result is not None else cls()

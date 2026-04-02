@@ -1,5 +1,6 @@
 import platform
 from pathlib import Path
+from typing import Dict, List
 
 from pmm_models import Game
 
@@ -14,7 +15,7 @@ def _docs() -> Path:
 
 _PARADOX = _docs() / "Paradox Interactive"
 
-KNOWN_GAMES: list[Game] = [
+KNOWN_GAMES: List[Game] = [
    Game("stellaris", "Stellaris", 281990, user_data_path=_PARADOX / "Stellaris"),
    Game("hoi4", "Hearts of Iron IV", 394360, user_data_path=_PARADOX / "Hearts of Iron IV"),
    Game("eu4", "Europa Universalis IV", 236850, user_data_path=_PARADOX / "Europa Universalis IV"),
@@ -29,7 +30,7 @@ def get_game(game_id: str) -> Game | None:
    return next((g for g in KNOWN_GAMES if g.id == game_id), None)
 
 
-def get_effective_user_data(game: Game, game_paths: dict[str, str]) -> Path | None:
+def get_effective_user_data(game: Game, game_paths: Dict[str, str]) -> Path | None:
    """
    Return the user-data path for a game, preferring any manual override
    stored in prefs.game_paths over the auto-detected default.
@@ -38,7 +39,7 @@ def get_effective_user_data(game: Game, game_paths: dict[str, str]) -> Path | No
    return Path(override) if override else game.user_data_path
 
 
-def get_mod_dir(game: Game, game_paths: dict[str, str] | None = None) -> Path | None:
+def get_mod_dir(game: Game, game_paths: Dict[str, str] | None = None) -> Path | None:
    """Return <user_data>/mod, honouring any path override from settings."""
    base = get_effective_user_data(game, game_paths or {})
    return None if base is None else base / "mod"

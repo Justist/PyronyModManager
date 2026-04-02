@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Dict
 
 from PySide6.QtWidgets import (
    QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -23,7 +24,7 @@ class SettingsDialog(QDialog):
       self.setWindowTitle("Settings")
       self.setMinimumWidth(560)
       self._prefs = prefs
-      self._path_edits: dict[str, QLineEdit] = {}
+      self._path_edits: Dict[str, QLineEdit] = {}
 
       layout = QVBoxLayout(self)
       layout.addWidget(self._build_paths_group())
