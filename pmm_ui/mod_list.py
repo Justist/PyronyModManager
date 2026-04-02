@@ -1,0 +1,322 @@
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QDropEvent
+from PySide6.QtWidgets import (
+   QAbstractItemView, QHBoxLayout, QLabel, QLineEdit,
+   QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
+)
+
+from pmm_models import Mod
+
+
+# ── Multi-item drag-drop list ─────────────────────────────────────────────────
+
+class _MultiDragList(QListWidget):
+   """
+   QListWidget subclass that supports dragging multiple selected items at once
+   while preserving their relative order.
+
+   Qt's built-in InternalMove drops items one by one, which scrambles order
+   when more than one row is selected.  This subclass intercepts dropEvent,
+   collects all selected rows sorted by position, removes them, then
+   re-inserts them contiguously at the computed target row.
+   """
+
+   items_reordered = Signal()
+
+   def __init__(self, parent=None) -> None:
+      super().__init__(parent)
+      self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+      self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+      self.setDefaultDropAction(Qt.DropAction.MoveAction)
+      self.setDragEnabled(True)
+      self.setAcceptDrops(True)
+
+   def dropEvent(self, event: QDropEvent) -> None:  # type: ignore[override]
+      selected_rows = sorted(self.row(it) for it in self.selectedItems())
+      if not selected_rows:
+         event.ignore()
+         return
+
+      # Snapshot item data before any removal
+      snapshots = [_snapshot(self.item(r)) for r in selected_rows]
+
+      # Determine insertion row from the drop position
+      target = self._target_row(event.position().toPoint())
+
+      # Remove from bottom to top so indices stay valid
+      for row in reversed(selected_rows):
+         self.takeItem(row)
+
+      # The target row shifts down by the number of removed rows above it
+      rows_above = sum(1 for r in selected_rows if r < target)
+      insert_at = max(0, min(target - rows_above, self.count()))
+
+      # Re-insert in original relative order and re-select them
+      for offset, snap in enumerate(snapshots):
+         new_item = _restore(snap)
+         self.insertItem(insert_at + offset, new_item)
+         new_item.setSelected(True)
+
+      event.setDropAction(Qt.DropAction.IgnoreAction)
+      event.accept()
+      self.items_reordered.emit()
+
+   def _target_row(self, pos) -> int:
+      """Return the insertion row for a drop at pixel position `pos`."""
+      index = self.indexAt(pos)
+      if not index.isValid():
+         return self.count()
+      rect = self.visualRect(index)
+      return index.row() + (1 if pos.y() >= rect.center().y() else 0)
+
+
+# ── ModListWidget ─────────────────────────────────────────────────────────────
+
+class ModListWidget(QWidget):
+   """
+   Dual-list mod selector driven by checkboxes.
+
+   Left  – all mods on disk, unchecked.  Checking one (or all currently
+           selected items when one of them is checked) moves them into the
+           active playset on the right.
+   Right – active playset in load order, all checked.  Unchecking one moves
+           it back to the left.  Multiple items can be dragged together
+           (preserving relative order) or moved with ▲/▼.
+
+   Both panels are disabled when no collection is active; call
+   set_active_enabled(bool) to switch.  The signal order_changed(list[str])
+   fires whenever the active list changes, so main_window.py is unaffected.
+   """
+
+   order_changed: Signal = Signal(list)
+
+   def __init__(self, parent: QWidget | None = None) -> None:
+      super().__init__(parent)
+      self._mods: dict[str, Mod] = {}
+      self._loading: bool = False
+      self._collection_active: bool = False
+
+      # ── left: available ──────────────────────────────────────────────────
+      self._avail_label = QLabel("Available mods")
+      self._avail_label.setStyleSheet("font-weight: bold;")
+
+      self._search = QLineEdit()
+      self._search.setPlaceholderText("Filter available mods…")
+      self._search.textChanged.connect(self._apply_filter)
+
+      self._avail = QListWidget()
+      self._avail.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+      self._avail.setSortingEnabled(True)
+      self._avail.itemChanged.connect(self._on_avail_changed)
+
+      left_layout = QVBoxLayout()
+      left_layout.setContentsMargins(0, 0, 0, 0)
+      left_layout.addWidget(self._avail_label)
+      left_layout.addWidget(self._search)
+      left_layout.addWidget(self._avail)
+
+      # ── right: active playset ────────────────────────────────────────────
+      self._active_label = QLabel("Active playset")
+      self._active_label.setStyleSheet("font-weight: bold;")
+
+      self._active = _MultiDragList()
+      self._active.items_reordered.connect(self._emit_order)
+      self._active.itemChanged.connect(self._on_active_changed)
+
+      self._btn_up = QPushButton("▲ Up")
+      self._btn_down = QPushButton("▼ Down")
+      self._btn_up.setFixedWidth(80)
+      self._btn_down.setFixedWidth(80)
+      self._btn_up.clicked.connect(self._move_up)
+      self._btn_down.clicked.connect(self._move_down)
+
+      order_row = QHBoxLayout()
+      order_row.setContentsMargins(0, 0, 0, 0)
+      order_row.addWidget(self._btn_up)
+      order_row.addWidget(self._btn_down)
+      order_row.addStretch()
+
+      right_layout = QVBoxLayout()
+      right_layout.setContentsMargins(0, 0, 0, 0)
+      right_layout.addWidget(self._active_label)
+      right_layout.addWidget(self._active)
+      right_layout.addLayout(order_row)
+
+      # ── root layout ──────────────────────────────────────────────────────
+      root = QHBoxLayout(self)
+      root.setContentsMargins(0, 0, 0, 0)
+      root.addLayout(left_layout, stretch=1)
+      root.addLayout(right_layout, stretch=1)
+
+      self.set_active_enabled(False)
+
+   # ── public API ────────────────────────────────────────────────────────────
+
+   def load_mods(self, mods: list[Mod], ordered_ids: list[str]) -> None:
+      self._mods = {m.id: m for m in mods}
+      active_set = set(ordered_ids)
+
+      self._loading = True
+
+      self._active.clear()
+      for mid in ordered_ids:
+         if mid in self._mods:
+            self._active.addItem(_make_item(self._mods[mid], checked=True))
+
+      self._avail.clear()
+      for mod in mods:
+         if mod.id not in active_set:
+            self._avail.addItem(_make_item(mod, checked=False))
+
+      self._loading = False
+      self._update_labels()
+      self._apply_filter(self._search.text())
+
+   def current_order(self) -> list[str]:
+      return [
+         self._active.item(i).data(Qt.ItemDataRole.UserRole)
+         for i in range(self._active.count())
+      ]
+
+   def set_active_enabled(self, enabled: bool) -> None:
+      self._collection_active = enabled
+      for w in (self._avail, self._search, self._active,
+                self._btn_up, self._btn_down):
+         w.setEnabled(enabled)
+
+   # ── itemChanged handlers ──────────────────────────────────────────────────
+
+   def _on_avail_changed(self, item: QListWidgetItem) -> None:
+      """Checking in the available list moves item(s) to the active playset."""
+      if self._loading or not self._collection_active:
+         return
+      if item.checkState() != Qt.CheckState.Checked:
+         return
+
+      selected = self._avail.selectedItems()
+      to_move = list(selected) if item in selected else [item]
+
+      self._loading = True
+      for it in to_move:
+         it.setCheckState(Qt.CheckState.Checked)
+      self._loading = False
+
+      for it in to_move:
+         mid = it.data(Qt.ItemDataRole.UserRole)
+         if mid not in self._mods:
+            continue
+         row = self._avail.row(it)
+         if row >= 0:
+            self._avail.takeItem(row)
+         self._active.addItem(_make_item(self._mods[mid], checked=True))
+
+      self._update_labels()
+      self._emit_order()
+
+   def _on_active_changed(self, item: QListWidgetItem) -> None:
+      """Unchecking in the active playset moves the item back to available."""
+      if self._loading:
+         return
+      if item.checkState() != Qt.CheckState.Unchecked:
+         return
+
+      mid = item.data(Qt.ItemDataRole.UserRole)
+      if mid not in self._mods:
+         return
+
+      row = self._active.row(item)
+      if row >= 0:
+         self._active.takeItem(row)
+      self._avail.addItem(_make_item(self._mods[mid], checked=False))
+
+      self._update_labels()
+      self._emit_order()
+
+   # ── ▲/▼ reorder — multi-selection aware ──────────────────────────────────
+
+   def _move_up(self) -> None:
+      rows = sorted(self._active.row(it) for it in self._active.selectedItems())
+      if not rows or rows[0] == 0:
+         return
+      self._loading = True
+      for row in rows:  # top-to-bottom: each moves up by 1
+         item = self._active.takeItem(row)
+         self._active.insertItem(row - 1, item)
+         self._active.item(row - 1).setSelected(True)
+      self._loading = False
+      self._emit_order()
+
+   def _move_down(self) -> None:
+      rows = sorted(
+         (self._active.row(it) for it in self._active.selectedItems()),
+         reverse=True,
+      )
+      if not rows or rows[0] == self._active.count() - 1:
+         return
+      self._loading = True
+      for row in rows:  # bottom-to-top: each moves down by 1
+         item = self._active.takeItem(row)
+         self._active.insertItem(row + 1, item)
+         self._active.item(row + 1).setSelected(True)
+      self._loading = False
+      self._emit_order()
+
+   # ── filter ────────────────────────────────────────────────────────────────
+
+   def _apply_filter(self, text: str) -> None:
+      needle = text.strip().lower()
+      for i in range(self._avail.count()):
+         it = self._avail.item(i)
+         it.setHidden(bool(needle and needle not in it.text().lower()))
+      self._update_labels()
+
+   # ── helpers ───────────────────────────────────────────────────────────────
+
+   def _emit_order(self, *_) -> None:
+      self.order_changed.emit(self.current_order())
+
+   def _update_labels(self) -> None:
+      visible = sum(
+         1 for i in range(self._avail.count())
+         if not self._avail.item(i).isHidden()
+      )
+      self._avail_label.setText(f"Available mods  ({visible})")
+      self._active_label.setText(f"Active playset  ({self._active.count()})")
+
+
+# ── item helpers ──────────────────────────────────────────────────────────────
+
+def _make_item(mod: Mod, checked: bool) -> QListWidgetItem:
+   label = f"{mod.name}  [{mod.supported_version}]"
+   item = QListWidgetItem(label)
+   item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+   item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+   item.setData(Qt.ItemDataRole.UserRole, mod.id)
+   item.setToolTip(
+      f"ID: {mod.id}\n"
+      f"Version: {mod.version or '—'}\n"
+      f"Supported: {mod.supported_version or '—'}\n"
+      f"Path: {mod.path}"
+   )
+   return item
+
+
+def _snapshot(item: QListWidgetItem) -> dict:
+   """Capture all displayable state of an item before takeItem() destroys it."""
+   return {
+      "text": item.text(),
+      "data": item.data(Qt.ItemDataRole.UserRole),
+      "flags": item.flags(),
+      "check": item.checkState(),
+      "tooltip": item.toolTip(),
+   }
+
+
+def _restore(snap: dict) -> QListWidgetItem:
+   """Reconstruct a QListWidgetItem from a snapshot."""
+   item = QListWidgetItem(snap["text"])
+   item.setFlags(snap["flags"])
+   item.setCheckState(snap["check"])
+   item.setData(Qt.ItemDataRole.UserRole, snap["data"])
+   item.setToolTip(snap["tooltip"])
+   return item
