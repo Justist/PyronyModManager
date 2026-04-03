@@ -79,19 +79,40 @@ The main tab is a dual‑list view:
 
 - **Available mods** (left):
   - All `.mod` descriptors discovered in the game’s `mod` directory.
-  - Filter bar with a small query language:
-    - Free text filters by name (case‑insensitive).
-    - `version=...` filters by supported version, with `*` wildcard:
-      - `version=4.3` → contains `4.3`.
-      - `version=4*` → versions starting with `4` (4.0, 4.1, …).
-      - `version=*` → any non‑empty supported version.
-    - Combine with `and` / `or`:
-      - `ai and version=4.3`
-      - `ai or graphics`
-    - Optional regex:
-      - `name~/ai.*fix/`
-      - `version~/^4\.1/`
-  - Right‑click → “Filter help…” with examples.
+  - Filter bar with a small, human‑friendly query language:
+
+    **Basic name search**
+
+    - Type words to match mod names (case‑insensitive).
+    - All words must appear somewhere in the name, in any order.
+      - `ui dyn` → matches “UI Overhaul Dynamic”.
+      - `dyn ui` → also matches “UI Overhaul Dynamic”.
+      - `ai graphics` → matches “AI Graphics Overhaul”.
+
+    **Version filters**
+
+    - `version=…` matches the mod’s *supported version* (`supported_version` field).
+    - `version=` (empty) matches all mods.
+    - `version=4.3` → supported version contains `4.3`.
+    - `version=4*` → supported version starting with `4` (`4`, `4.0`, `4.1`, `4.10`, …).
+    - `version=4.*` → supported version containing a fragment starting with `4.` (e.g. `4.0`, `v4.1.*`).
+    - `version=*` → any supported version (including empty ones).
+    - Mods whose supported version is generic (`*`, `v*`, or `V*`) always match any `version=` filter.
+
+    **Combining filters**
+
+    - Use `&&` for “and”, `||` for “or”:
+      - `ai && version=4.3`
+      - `dyn over ui && version=4*`
+      - `ai || graphics`
+
+    **Advanced (optional)**
+
+    - Regex on name or version:
+      - `name~/ai.*fix/` → name matches the regex `ai.*fix`.
+      - `version~/^4\.1/` → supported version matches the regex `^4\.1`.
+
+    Right‑click on the filter bar to open a “Filter help…” popup with these examples.
 
 - **Active playset** (right):
   - Checked mods in explicit load order.
@@ -110,7 +131,7 @@ Persisted user preferences include:
 - Last active game and collection.
 - Per‑game user‑data path overrides.
 - Whether to check for updates on startup.
-- UI font size (used for the mod lists).
+- UI font size (used for the mod list entries; rows scale with font size).
 
 Settings are stored as compact JSON under:
 
