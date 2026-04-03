@@ -171,8 +171,6 @@ class ModListWidget(QWidget):
 
       self._btn_up = QPushButton("▲ Up")
       self._btn_down = QPushButton("▼ Down")
-      self._btn_up.setFixedWidth(80)
-      self._btn_down.setFixedWidth(80)
       self._btn_up.clicked.connect(self._move_up)
       self._btn_down.clicked.connect(self._move_down)
 
@@ -225,6 +223,9 @@ class ModListWidget(QWidget):
       )
 
    def load_mods(self, mods: List[Mod], ordered_ids: List[str]) -> None:
+      """
+      Load all mods and mark the ones in ordered_ids as active, in that order.
+      """
       self._mods = {m.id: m for m in mods}
       active_set = set(ordered_ids)
 
@@ -233,11 +234,15 @@ class ModListWidget(QWidget):
       self._active.clear()
       self._avail.clear()
 
-      # fill active and available in a single pass
-      for mod in mods:
-         if mod.id in active_set:
+      # 1) Fill the active list strictly in ordered_ids order.
+      for mid in ordered_ids:
+         mod = self._mods.get(mid)
+         if mod is not None:
             self._active.addTopLevelItem(_make_active_item(mod, checked=True))
-         else:
+
+      # 2) Fill the available list with everything else.
+      for mod in mods:
+         if mod.id not in active_set:
             self._avail.addTopLevelItem(_make_avail_item(mod, checked=False))
 
       self._loading = False
