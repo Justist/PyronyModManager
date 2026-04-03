@@ -381,11 +381,11 @@ class ModListWidget(QWidget):
         • just words → match mod name (case-insensitive)
             "ai fix"        → name contains "ai fix"
         • version=... → match supported version
-            "version=1.11"  → supported version contains "1.11"
+            "version=4.3"  → supported version contains "4.3"
             "version=4*"    → supported version starts with "4" (4.0, 4.1, …)
             "version=*"     → any non-empty supported version
         • Combine with and/or (case-insensitive)
-            "ai and version=1.11"
+            "ai and version=4.3"
             "ai or graphics"
 
       Advanced (optional):
@@ -455,7 +455,7 @@ class ModListWidget(QWidget):
       Build a predicate for a single term, e.g.:
 
         "foo"              – name contains "foo"
-        "version=1.11"     – version/supported_version contains "1.11"
+        "version=4.3"     – version/supported_version contains "4.3"
         "name~/ai.*fix/"   – name matches regex
         "version~/^1\\.11/" – version matches regex
       """
@@ -483,7 +483,7 @@ class ModListWidget(QWidget):
       # Examples:
       #   version=4*   → supported_version starts with "4" (4, 4.1, 4.2, …)
       #   version=*    → any non-empty supported_version
-      #   version=1.11 → substring match "1.11" in supported_version
+      #   version=4.3 → substring match "4.3" in supported_version
       if term.lower().startswith("version="):
          raw = term[len("version="):].strip()
          # Empty pattern → match any non-empty supported_version.
@@ -562,12 +562,12 @@ class ModListWidget(QWidget):
          "      Example:  ai fix\n"
          "  • Use version=… to match supported version.\n"
          "      Examples:\n"
-         "        version=1.11   → supported version contains 1.11\n"
+         "        version=4.3   → supported version contains 4.3\n"
          "        version=4*     → supported version starts with 4 (4.0, 4.1, …)\n"
          "        version=*      → any non-empty supported version\n"
          "  • Combine with and/or (case-insensitive).\n"
          "      Examples:\n"
-         "        ai and version=1.11\n"
+         "        ai and version=4.3\n"
          "        ai or graphics\n\n"
          "Advanced (optional):\n"
          "  • name~/regex/      → name matches regex\n"
