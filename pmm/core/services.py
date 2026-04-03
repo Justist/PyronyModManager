@@ -59,6 +59,7 @@ _BINARY_EXTS = frozenset({
    ".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".webp",
    ".wav", ".ogg", ".mp3", ".wem",
    ".mesh", ".anim", ".asset",
+   ".py", ".dll", ".exe", ".bin", ".dat", ".zip", ".7z", ".rar",
 })
 
 # Files with these extensions are Clausewitz text and can be deep-diffed.

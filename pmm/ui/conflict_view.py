@@ -59,6 +59,49 @@ class _ModNodeData:
    mod: Mod
 
 
+def _sorted_owners_by_dependency(owners: list[Mod]) -> list[Mod]:
+   """
+   Return a new owners list where, for any pair (depender, dependee) with
+   depender.dependencies containing dependee.name, the dependee is placed
+   before the depender. For files with more than two mods this is a
+   best-effort local adjustment; we keep the overall order as stable as
+   possible.
+   """
+   if len(owners) <= 1:
+      return list(owners)
+
+   name_to_mod = {m.name: m for m in owners}
+
+   # Build a simple "depends_on" set for quick lookup.
+   depends_on: dict[str, set[str]] = {}
+   for m in owners:
+      deps = {d for d in m.dependencies if d in name_to_mod}
+      if deps:
+         depends_on[m.name] = deps
+
+   ordered = list(owners)
+
+   # Single pass: if A depends on B and B appears after A, swap them so B→A.
+   n = len(ordered)
+   for i in range(n):
+      a = ordered[i]
+      deps = depends_on.get(a.name)
+      if not deps:
+         continue
+      for j in range(n):
+         b = ordered[j]
+         if b is a:
+            continue
+         if b.name in deps and j > i:
+            # Move b before a; keep relative order otherwise.
+            ordered.pop(j)
+            insert_at = ordered.index(a)
+            ordered.insert(insert_at, b)
+            break
+
+   return ordered
+
+
 # ── ConflictView ──────────────────────────────────────────────────────────────
 
 class ConflictView(QWidget):
@@ -211,13 +254,18 @@ class ConflictView(QWidget):
          label = "hard" if is_hard else "soft"
          color = QColor("#e07070") if is_hard else QColor("#cc9900")
 
-         top = QTreeWidgetItem([rel_path, f"{icon} {len(fc.owners)} mods · {label}"])
+         owners = _sorted_owners_by_dependency(fc.owners)
+
+         top = QTreeWidgetItem([rel_path, f"{icon} {len(owners)} mods · {label}"])
          top.setForeground(0, color)
          top.setForeground(1, color)
-         top.setData(0, Qt.ItemDataRole.UserRole,
-                     _FileNodeData("file", rel_path, fc.owners, fc.severity))
+         top.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            _FileNodeData("file", rel_path, owners, fc.severity),
+         )
 
-         for mod in fc.owners:
+         for mod in owners:
             child = QTreeWidgetItem([f"  {mod.name}", ""])
             child.setData(0, Qt.ItemDataRole.UserRole,
                           _ModNodeData("mod", rel_path, mod))
@@ -265,11 +313,13 @@ class ConflictView(QWidget):
       if isinstance(data, _FileNodeData) and data.kind == "file":
          self._show_diff_for_owners(data.rel_path, data.owners)
 
+
       elif isinstance(data, _ModNodeData) and data.kind == "mod":
          fc = self._conflicts.get(data.rel_path)
-         owners = fc.owners if fc else []
+         owners = _sorted_owners_by_dependency(fc.owners) if fc else []
          others = [m for m in owners if m is not data.mod]
          if others:
+            # Show the first dependency-sorted neighbour vs the selected mod.
             self._show_diff_for_owners(data.rel_path, [others[0], data.mod])
 
    # ── diff panel ────────────────────────────────────────────────────────────
