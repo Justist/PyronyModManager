@@ -1,11 +1,10 @@
 from typing import Dict, List
 
-from PySide6.QtCore import Signal
-from PySide6.QtGui import QDropEvent, Qt
-from PySide6.QtWidgets import (
-   QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-   QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
-)
+from PySide6.QtCore import QPoint, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QDropEvent
+from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QMenu, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from pmm.core.models import Mod
 
@@ -35,7 +34,7 @@ class _MultiDragList(QTreeWidget):
       header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
       header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
       header.resizeSection(0, 28)  # tiny index column
-      header.setVisible(False)     # hide header; we just want the column
+      header.setVisible(False)  # hide header; we just want the column
 
       self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
       self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -132,6 +131,10 @@ class ModListWidget(QWidget):
       self._avail.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
       self._avail.setSortingEnabled(True)
       self._avail.itemChanged.connect(self._on_avail_changed)
+      self._avail.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+      self._avail.customContextMenuRequested.connect(
+         lambda pos: self._show_context_menu(self._avail, pos)
+      )
       # sort by Supported version column by default
       self._avail.sortItems(1, Qt.SortOrder.DescendingOrder)
 
@@ -155,6 +158,10 @@ class ModListWidget(QWidget):
       self._active = _MultiDragList()
       self._active.items_reordered.connect(self._emit_order)
       self._active.itemChanged.connect(self._on_active_changed)
+      self._active.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+      self._active.customContextMenuRequested.connect(
+         lambda pos: self._show_context_menu(self._active, pos)
+      )
 
       self._btn_up = QPushButton("▲ Up")
       self._btn_down = QPushButton("▼ Down")
@@ -216,11 +223,13 @@ class ModListWidget(QWidget):
       header.resizeSection(1, supported_width)
 
    def current_order(self) -> List[str]:
-      returnList: List[str] = []
+      return_list: List[str] = []
       for i in range(self._active.topLevelItemCount()):
          if (tlii := self._active.topLevelItem(i)) is not None:
-            returnList.append(tlii.data(1, Qt.ItemDataRole.UserRole))
-      return returnList
+            mod: Mod | None = tlii.data(1, Qt.ItemDataRole.UserRole)
+            if isinstance(mod, Mod):
+               return_list.append(mod.id)
+      return return_list
 
    def set_active_enabled(self, enabled: bool) -> None:
       self._collection_active = enabled
@@ -249,8 +258,9 @@ class ModListWidget(QWidget):
       self._loading = False
 
       for it in to_move:
-         mid = it.data(0, Qt.ItemDataRole.UserRole)
-         if mid not in self._mods:
+         mod: Mod | None = it.data(0, Qt.ItemDataRole.UserRole)
+         mid = mod.id if isinstance(mod, Mod) else None
+         if not mid or mid not in self._mods:
             continue
          idx = self._avail.indexOfTopLevelItem(it)
          if idx >= 0:
@@ -270,8 +280,9 @@ class ModListWidget(QWidget):
       if item.checkState(1) != Qt.CheckState.Unchecked:
          return
 
-      mid = item.data(1, Qt.ItemDataRole.UserRole)
-      if mid not in self._mods:
+      mod: Mod | None = item.data(1, Qt.ItemDataRole.UserRole)
+      mid = mod.id if isinstance(mod, Mod) else None
+      if not mid or mid not in self._mods:
          return
 
       row = self._active.indexOfTopLevelItem(item)
@@ -349,6 +360,45 @@ class ModListWidget(QWidget):
    def _emit_order(self, *_) -> None:
       self.order_changed.emit(self.current_order())
 
+   def _show_context_menu(self, tree: QTreeWidget, pos: QPoint) -> None:
+      """Show context menu for the item at the given position."""
+      item = tree.itemAt(pos)
+      if item is None:
+         return
+
+      # Determine which column carries the Mod object.
+      col = 0 if tree is self._avail else 1
+      mod: Mod | None = item.data(col, Qt.ItemDataRole.UserRole)
+      if not isinstance(mod, Mod):
+         return
+
+      menu = QMenu(self)
+      open_folder = menu.addAction("Open in File Explorer")
+      open_workshop = menu.addAction("Open in Steam Workshop")
+      if not mod.remote_id:
+         open_workshop.setEnabled(False)
+
+      action = menu.exec(tree.viewport().mapToGlobal(pos))
+      if action is open_folder:
+         self._open_mod_folder(mod)
+      elif action is open_workshop and mod.remote_id:
+         self._open_mod_workshop(mod)
+
+   def _open_mod_folder(self, mod: Mod) -> None:
+      """Open the mod's folder in the system file manager."""
+      path = mod.path
+      if not path:
+         return
+      url = QUrl.fromLocalFile(str(path))
+      QDesktopServices.openUrl(url)
+
+   def _open_mod_workshop(self, mod: Mod) -> None:
+      """Open the mod's Steam Workshop page, if it has a remote_id."""
+      if not mod.remote_id:
+         return
+      url = QUrl(f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod.remote_id}")
+      QDesktopServices.openUrl(url)
+
    def _update_labels(self) -> None:
       """Update the available-mods label with the number of visible entries."""
       visible = 0
@@ -378,7 +428,8 @@ def _make_active_item(mod: Mod, checked: bool) -> QTreeWidgetItem:
       | Qt.ItemFlag.ItemIsEnabled
    )
    item.setCheckState(1, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-   item.setData(1, Qt.ItemDataRole.UserRole, mod.id)
+   # Store full Mod object for context-menu actions; id is still derivable.
+   item.setData(1, Qt.ItemDataRole.UserRole, mod)
    tooltip = (
       f"ID: {mod.id}\n"
       f"Version: {mod.version or '—'}\n"
@@ -399,9 +450,12 @@ def _make_avail_item(mod: Mod, checked: bool) -> QTreeWidgetItem:
    version = mod.supported_version or ""
    item = QTreeWidgetItem([mod.name, version])
    # Enable user checkability only on the first column
-   item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+   item.setFlags(
+      item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable |
+      Qt.ItemFlag.ItemIsEnabled)
    item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-   item.setData(0, Qt.ItemDataRole.UserRole, mod.id)
+   # Store full Mod object for context-menu actions.
+   item.setData(0, Qt.ItemDataRole.UserRole, mod)
    item.setToolTip(
       0,
       f"ID: {mod.id}\n"
