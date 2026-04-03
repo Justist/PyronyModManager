@@ -1,10 +1,13 @@
-from typing import Dict, List
+import re
+from typing import Callable, Dict, List, Tuple
 
 from PySide6.QtCore import QPoint, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QDropEvent, QFont
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMenu, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtGui import QDesktopServices, QDropEvent
+from PySide6.QtWidgets import (
+   QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+   QMenu, QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem,
+   QVBoxLayout, QWidget,
+)
 
 from pmm.core.models import Mod
 
@@ -124,6 +127,9 @@ class ModListWidget(QWidget):
       self._search = QLineEdit()
       self._search.setPlaceholderText("Filter available mods…")
       self._search.textChanged.connect(self._apply_filter)
+      # Right-click → show filter help menu
+      self._search.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+      self._search.customContextMenuRequested.connect(self._on_search_context_menu)
 
       self._avail = QTreeWidget()
       self._avail.setColumnCount(2)
@@ -368,23 +374,212 @@ class ModListWidget(QWidget):
    # ── filter ────────────────────────────────────────────────────────────────
 
    def _apply_filter(self, text: str) -> None:
-      """Filter available mods by case-insensitive substring match on the name."""
-      needle = text.strip().lower()
+      """
+      Filter available mods using a simple, human-friendly query.
+
+      You can type:
+        • just words → match mod name (case-insensitive)
+            "ai fix"        → name contains "ai fix"
+        • version=... → match supported version
+            "version=1.11"  → supported version contains "1.11"
+            "version=4*"    → supported version starts with "4" (4.0, 4.1, …)
+            "version=*"     → any non-empty supported version
+        • Combine with and/or (case-insensitive)
+            "ai and version=1.11"
+            "ai or graphics"
+
+      Advanced (optional):
+        • name~/regex/      → name matches regex
+        • version~/regex/   → version matches regex
+      """
+      query = text.strip()
       count = self._avail.topLevelItemCount()
+
+      # Empty query → show everything.
+      if not query:
+         for i in range(count):
+            it = self._avail.topLevelItem(i)
+            if it is not None:
+               it.setHidden(False)
+         self._update_labels()
+         return
+
+      predicates = self._build_predicates(query)
+
       for i in range(count):
          it = self._avail.topLevelItem(i)
          if it is None:
             continue
-         if not needle:
-            it.setHidden(False)
-         else:
-            it.setHidden(needle not in it.text(0).lower())
+         mod: Mod | None = it.data(0, Qt.ItemDataRole.UserRole)
+         if not isinstance(mod, Mod):
+            it.setHidden(True)
+            continue
+         it.setHidden(not self._match_mod(mod, predicates))
+
       self._update_labels()
+
+   def _build_predicates(self, query: str) -> List[Tuple[str, Callable]]:
+      """
+      Parse query string into a list of (op, predicate) tuples.
+
+      - op is "and" or "or"
+      - The first term defaults to "and"
+      - Evaluation is left-to-right
+      """
+      parts: List[Tuple[str, str]] = []
+      rest = query
+
+      # Split on "and"/"or" words, ignoring case. Allow any amount of whitespace.
+      while rest:
+         m = re.search(r"\b(and|or)\b", rest, flags=re.IGNORECASE)
+         if not m:
+            term = rest.strip()
+            if term:
+               parts.append(("and", term))
+            break
+         op = m.group(1).lower()
+         term = rest[: m.start()].strip()
+         if term:
+            parts.append(("and" if not parts else op, term))
+         rest = rest[m.end():]
+
+      predicates: List[Tuple[str, Callable]] = []
+      for op, term in parts:
+         if not term:
+            continue
+         predicates.append((op, self._make_term_pred(term)))
+      return predicates
+
+   def _make_term_pred(self, term: str):
+      """
+      Build a predicate for a single term, e.g.:
+
+        "foo"              – name contains "foo"
+        "version=1.11"     – version/supported_version contains "1.11"
+        "name~/ai.*fix/"   – name matches regex
+        "version~/^1\\.11/" – version matches regex
+      """
+      term = term.strip()
+
+      # Regex forms: name~/.../ or version~/.../
+      m = re.fullmatch(r"(name|version)~/(.*)/", term, flags=re.IGNORECASE)
+      if m:
+         field = m.group(1).lower()
+         pattern = m.group(2)
+         try:
+            rx = re.compile(pattern, flags=re.IGNORECASE)
+         except re.error:
+            # Invalid regex → never matches (but doesn't crash).
+            return lambda _m: False
+
+         if field == "version":
+            return lambda mod: bool(
+               rx.search((mod.supported_version or "") + " " + (mod.version or ""))
+            )
+         else:  # name
+            return lambda mod: bool(rx.search(mod.name or ""))
+
+      # version=... spec: match supported_version only, with '*' wildcard.
+      # Examples:
+      #   version=4*   → supported_version starts with "4" (4, 4.1, 4.2, …)
+      #   version=*    → any non-empty supported_version
+      #   version=1.11 → substring match "1.11" in supported_version
+      if term.lower().startswith("version="):
+         raw = term[len("version="):].strip()
+         # Empty pattern → match any non-empty supported_version.
+         if not raw:
+            return lambda mod: bool(mod.supported_version)
+
+         sv_get = lambda mod: (mod.supported_version or "")
+
+         # If pattern contains '*', treat it as a simple wildcard:
+         # we only support a single '*' anywhere (start, middle, end).
+         if "*" in raw:
+            # Escape everything except '*', then replace '*' with '.*'
+            # and anchor at start to make "4*" intuitive.
+            pattern = ""
+            for ch in raw:
+               if ch == "*":
+                  pattern += ".*"
+               else:
+                  pattern += re.escape(ch)
+            # Case-insensitive regex
+            try:
+               rx = re.compile("^" + pattern + "$", flags=re.IGNORECASE)
+            except re.error:
+               return lambda _m: False
+
+            return lambda mod: bool(sv_get(mod)) and bool(rx.match(sv_get(mod)))
+         else:
+            # No wildcard: simple case-insensitive substring match.
+            value = raw.lower()
+            return lambda mod: value in sv_get(mod).lower()
+
+      # Fallback: plain text against name (case-insensitive substring)
+      value = term.lower()
+      return lambda mod: value in (mod.name or "").lower()
+
+   def _match_mod(self, mod: Mod, predicates: List[Tuple[str, Callable]]) -> bool:
+      """Evaluate predicates left-to-right with AND/OR semantics."""
+      if not predicates:
+         return True
+      result = predicates[0][1](mod)
+      for op, pred in predicates[1:]:
+         if op == "and":
+            result = result and pred(mod)
+         else:  # "or"
+            result = result or pred(mod)
+      return result
 
    # ── helpers ───────────────────────────────────────────────────────────────
 
    def _emit_order(self, *_) -> None:
       self.order_changed.emit(self.current_order())
+
+   def _on_search_context_menu(self, pos: QPoint) -> None:
+      """
+      Show a small context menu on the filter bar with a 'Filter help' item.
+      """
+      menu = QMenu(self)
+      help_action = menu.addAction("Filter help…")
+      # Also keep the default line-edit menu for editing actions
+      menu.addSeparator()
+      menu.addActions(self._search.createStandardContextMenu().actions())
+
+      action = menu.exec(self._search.mapToGlobal(pos))
+      if action is help_action:
+         self._show_filter_help()
+
+   def _show_filter_help(self) -> None:
+      """
+      Show a brief explanation of the filter syntax with examples,
+      without playing a system notification sound.
+      """
+      text = (
+         "Filter mods by name and supported version.\n\n"
+         "Basics:\n"
+         "  • Type words to match mod names (case-insensitive).\n"
+         "      Example:  ai fix\n"
+         "  • Use version=… to match supported version.\n"
+         "      Examples:\n"
+         "        version=1.11   → supported version contains 1.11\n"
+         "        version=4*     → supported version starts with 4 (4.0, 4.1, …)\n"
+         "        version=*      → any non-empty supported version\n"
+         "  • Combine with and/or (case-insensitive).\n"
+         "      Examples:\n"
+         "        ai and version=1.11\n"
+         "        ai or graphics\n\n"
+         "Advanced (optional):\n"
+         "  • name~/regex/      → name matches regex\n"
+         "  • version~/regex/   → supported version matches regex\n"
+      )
+
+      box = QMessageBox(self)
+      box.setWindowTitle("Filter help")
+      box.setText(text)
+      box.setIcon(QMessageBox.Icon.NoIcon)  # avoid system information sound
+      box.setStandardButtons(QMessageBox.StandardButton.Ok)
+      box.exec()
 
    def _show_context_menu(self, tree: QTreeWidget, pos: QPoint) -> None:
       """Show context menu for the item at the given position."""
