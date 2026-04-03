@@ -14,6 +14,7 @@ Phase 8 additions
 
 import contextlib
 import difflib
+import threading
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
@@ -70,6 +71,42 @@ _CW_TEXT_EXTS = frozenset({
 _ALL_TEXT_EXTS = _CW_TEXT_EXTS | frozenset({
    ".csv", ".yml", ".yaml", ".json", ".lua", ".shader", ".fxh",
 })
+
+
+# Cache for parse_text(...).definition_names() used by conflict scans.
+# Keyed by absolute file path + stat tuple so edits invalidate naturally.
+_DEF_NAMES_CACHE: dict[tuple[str, int, int], frozenset[str]] = {}
+_DEF_NAMES_CACHE_LOCK = threading.Lock()
+_DEF_NAMES_CACHE_MAX = 10_000
+
+
+def _definition_cache_key(path: Path) -> tuple[str, int, int] | None:
+   with contextlib.suppress(OSError):
+      st = path.stat()
+      return str(path.resolve()), st.st_mtime_ns, st.st_size
+   return None
+
+
+def _cached_definition_names(path: Path) -> frozenset[str]:
+   key = _definition_cache_key(path)
+   if key is None:
+      return frozenset()
+
+   with _DEF_NAMES_CACHE_LOCK:
+      cached = _DEF_NAMES_CACHE.get(key)
+   if cached is not None:
+      return cached
+
+   names: frozenset[str] = frozenset()
+   with contextlib.suppress(Exception):
+      text = path.read_text(encoding="utf-8-sig", errors="replace")
+      names = frozenset(parse_text(text, path).definition_names())
+
+   with _DEF_NAMES_CACHE_LOCK:
+      if len(_DEF_NAMES_CACHE) >= _DEF_NAMES_CACHE_MAX:
+         _DEF_NAMES_CACHE.clear()
+      _DEF_NAMES_CACHE[key] = names
+   return names
 
 
 # ── severity ──────────────────────────────────────────────────────────────────
@@ -169,11 +206,8 @@ def _classify_severity(
       path = mod.path / rel_path
       if not path.is_file():
          continue
-      with contextlib.suppress(Exception):
-         text = path.read_text(encoding="utf-8-sig", errors="replace")
-         cw = parse_text(text, path)
-         for k in cw.definition_names():
-            key_counts[k] += 1
+      for k in _cached_definition_names(path):
+         key_counts[k] += 1
 
    conflicting = sorted(k for k, n in key_counts.items() if n > 1)
    if conflicting:

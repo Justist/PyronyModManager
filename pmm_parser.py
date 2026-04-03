@@ -6,6 +6,7 @@ from pmm_models import Mod
 
 # Clausewitz key=value / key="value" / key={ list } pattern
 _KV = re.compile(r'^(\w+)\s*=\s*(?:"([^"]*)"|{([^}]*)}|(\S+))', re.MULTILINE)
+_EXCLUDED_NAME_PREFIXES = ("ironymodmanager", "pyronymodmanager")
 
 
 def _parse_block(text: str) -> Dict[str, Any]:
@@ -41,6 +42,11 @@ def parse_descriptor(path: Path) -> Mod:
    )
 
 
+def _is_excluded_mod_name(name: str) -> bool:
+   return name.strip().lower().startswith(_EXCLUDED_NAME_PREFIXES)
+
+
 def discover_mods(mod_dir: Path) -> List[Mod]:
    """Scan a directory for *.mod descriptor files and return parsed Mods."""
-   return [parse_descriptor(p) for p in sorted(mod_dir.glob("*.mod"))]
+   mods = [parse_descriptor(p) for p in sorted(mod_dir.glob("*.mod"))]
+   return [m for m in mods if not _is_excluded_mod_name(m.name)]
