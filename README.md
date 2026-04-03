@@ -132,8 +132,3 @@ Persisted user preferences include:
 - Per‑game user‑data path overrides.
 - Whether to check for updates on startup.
 - UI font size (used for the mod list entries; rows scale with font size).
-
-Settings are stored as compact JSON under:
-
-```text
-~/.config/pyirony/prefs.json
