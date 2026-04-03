@@ -1,22 +1,59 @@
+"""
+pmm_clausewitz
+==============
+Tokeniser, parser, AST, serialiser, and definition-extractor for
+the Clausewitz scripting language used by all modern Paradox games.
+
+Clausewitz syntax in brief
+--------------------------
+  key = value                     # scalar assignment
+  key = { … }                     # block assignment
+  key >= value                    # comparative assignment (triggers/conditions)
+  { value value … }               # bare list (inside a block)
+  # comment to end of line
+
+Public API
+----------
+  parse_file(path)  -> CWFile
+  parse_text(text, path?) -> CWFile
+
+  CWFile.top_pairs()   -> list[CWPair]
+  CWFile.definitions() -> dict[str, CWPair]
+      Stable key format:
+        named block   →  "key.inner_id"   e.g. "country_event.100"
+        unnamed block →  "key@N"          N = per-key positional index
+        scalar pair   →  "key"
+
+  unparse(node, depth?) -> str
+  unparse_pair(pair)    -> str
+"""
+
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Union
 
+
 # ── AST nodes ─────────────────────────────────────────────────────────────────
+
+class CWRaw(str):
+   """Bare value inside a block (NUMBER/DATE/IDENT etc. not attached to a key)."""
+   pass
+
 
 Value = Union["CWBlock", str]
 
 
 @dataclass
 class CWBlock:
-   """A { … } block; items are CWPair nodes or bare string values (list entries)."""
-   items: List[Union[CWPair, str]] = field(default_factory=list)
+   """A { … } block; items are CWPair nodes or bare values."""
+   items: List[Union["CWPair", CWRaw, "CWBlock"]] = field(default_factory=list)
 
 
 @dataclass
 class CWPair:
-   """key OP value   (OP is usually '=', but can be >, <, >=, <=, !=)."""
+   """key OP value  (OP is usually '=', but may be >, <, >=, <=, !=)."""
    key: str
    op: str
    value: Value
@@ -34,45 +71,80 @@ class CWFile:
 
    def definitions(self) -> Dict[str, CWPair]:
       """
-      Map each top-level named definition to a stable string key.
+      Map each top-level definition to a stable string key.
 
-      Blocks that contain an inner 'id' or 'name' key use that value as
-      their definition key (e.g. country_event.events.1).
-      Plain key=value pairs at the top level use their own key.
-      Last definition wins within a single file, mirroring Clausewitz.
+      Key generation rules (in priority order):
+        1. Named block  — block contains an inner 'id', 'name', 'token',
+                          'tag', 'key', 'type', or 'title' key
+                          → "outer_key.inner_value"
+                          e.g.  country_event = { id = 100 }  →  "country_event.100"
+
+        2. Unnamed block — block has no identity key
+                          → "outer_key@N"  where N is a per-outer-key counter
+                          Positional index (not line number) so definitions
+                          stay comparable across files that differ only in
+                          whitespace / comments.
+
+        3. Scalar pair  → "outer_key"
+
+      Last definition with the same key wins within a single file,
+      mirroring Clausewitz load order semantics.
       """
       result: Dict[str, CWPair] = {}
+      unnamed_counts: Dict[str, int] = defaultdict(int)
       for pair in self.top_pairs():
          if isinstance(pair.value, CWBlock):
-            inner_id = _inner_id(pair.value)
-            def_key = f"{pair.key}.{inner_id}" if inner_id else f"{pair.key}@{pair.line}"
+            if inner := _inner_id(pair.value):
+               def_key = f"{pair.key}.{inner}"
+            else:
+               n = unnamed_counts[pair.key]
+               unnamed_counts[pair.key] += 1
+               def_key = f"{pair.key}@{n}"
          else:
             def_key = pair.key
          result[def_key] = pair  # last one wins
       return result
 
+   def definition_names(self) -> set[str]:
+      """Return just the set of definition keys (cheaper than full definitions())."""
+      return set(self.definitions().keys())
 
-def _inner_id(block: CWBlock) -> str | CWBlock | None:
-   """Return the value of the first 'id' or 'name' key inside a block."""
-   return next(
-       (item.value
-        for item in block.items if isinstance(item, CWPair) and item.key in (
-            "id", "name") and isinstance(item.value, str)),
-       None,
-   )
+
+# ── identity-key detection ────────────────────────────────────────────────────
+
+# Keys inside a block that unambiguously identify the definition.
+# Ordered so the most common ones are checked first.
+_ID_KEYS = frozenset({
+   "id",  # events, provinces, …
+   "name",  # buildings, technologies, …
+   "token",  # decisions (HOI4, CK3)
+   "tag",  # country tags (EU4, HOI4)
+   "key",  # modifiers, localisation
+   "type",  # component_templates (Stellaris)
+   "title",  # laws (Vic3)
+})
+
+
+def _inner_id(block: CWBlock) -> str | None:
+   """Return the string value of the first identity key inside a block."""
+   for item in block.items:
+      if isinstance(item, CWPair) and item.key in _ID_KEYS:
+         if isinstance(item.value, str):
+            return item.value
+   return None
 
 
 # ── Tokeniser ─────────────────────────────────────────────────────────────────
 
 _PAT = re.compile(
    r'(?P<STRING>"[^"]*")'  # "quoted string"
-   r'|(?P<DATE>\b\d{1,4}\.\d{1,2}\.\d{1,2}\b)'  # date  (before NUMBER to avoid partial match)
-   r'|(?P<NUMBER>-?\d+\.?\d*)'  # integer or float
+   r'|(?P<DATE>\b\d{1,4}\.\d{1,2}\.\d{1,2}\b)'  # date  (before NUMBER)
+   r'|(?P<NUMBER>-?\d+\.?\d*)'  # integer / float
    r'|(?P<OP>>=|<=|!=|[=<>])'  # operator
    r'|(?P<LBRACE>{)'
    r'|(?P<RBRACE>})'
-   r'|(?P<IDENT>[@\w][.\w:-]*)'  # identifiers, @variables, dotted names
-   r'|(?P<SKIP>#[^\n]*|[ \t\r\n]+|.)',  # comments, whitespace, junk — all skipped
+   r'|(?P<IDENT>[@\w][.\w:-]*)'  # identifiers, @vars
+   r'|(?P<SKIP>#[^\n]*|[ \t\r\n]+|.)',  # comments, whitespace, junk
 )
 
 
@@ -107,8 +179,11 @@ class _Parser:
    def _peek(self) -> _Tok | None:
       return self._t[self._i] if self._i < len(self._t) else None
 
-   def _eat(self) -> _Tok | None:
+   def _eat(self) -> _Tok:
       tok = self._peek()
+      if tok is None:
+         # Parser logic should prevent this; this is a sanity guard.
+         raise RuntimeError("Attempted to consume token past end of stream")
       self._i += 1
       return tok
 
@@ -119,13 +194,12 @@ class _Parser:
          if tok is None:
             break
          if tok.kind == "RBRACE":
-            self._eat()  # consume '}' (for root blocks this is a stray brace)
+            self._eat()
             if not root:
                break
          elif tok.kind in ("IDENT", "STRING"):
-            # key = value   OR   bare list entry
             nxt = self._t[self._i + 1] if self._i + 1 < len(self._t) else None
-            if nxt and nxt.kind == "OP":
+            if nxt is not None and nxt.kind == "OP":
                key_tok = self._eat()
                op_tok = self._eat()
                val = self._parse_value()
@@ -138,10 +212,10 @@ class _Parser:
                   )
                )
             else:
-               block.items.append(tok.val.strip('"'))
+               block.items.append(CWRaw(tok.val.strip('"')))
                self._eat()
          elif tok.kind in ("NUMBER", "DATE"):
-            block.items.append(tok.val)
+            block.items.append(CWRaw(tok.val))
             self._eat()
          elif tok.kind == "LBRACE":
             self._eat()
@@ -161,18 +235,28 @@ class _Parser:
       return tok.val.strip('"')
 
 
-# ── Serialiser (AST → text) ───────────────────────────────────────────────────
+# ── Serialiser  (AST → canonical Clausewitz text) ────────────────────────────
 
 def unparse(node: Value, depth: int = 0) -> str:
    """Convert an AST node back to canonical Clausewitz text."""
    if isinstance(node, str):
-      return f'"{node}"' if " " in node or not node else node
+      # Covers both plain str and CWRaw
+      return f'"{node}"' if (" " in node or not node) else node
+
+   # At this point node must be a CWBlock
    pad = "\t" * depth
-   lines: list[str] = ["{"]
+   lines: List[str] = ["{"]
    for item in node.items:
       if isinstance(item, CWPair):
-         lines.append(f"{pad}\t{item.key} {item.op} {unparse(item.value, depth + 1)}")
+         lines.append(
+            f"{pad}\t{item.key} {item.op} "
+            f"{unparse(item.value, depth + 1)}"
+         )
+      elif isinstance(item, CWBlock):
+         nested = unparse(item, depth)
+         lines.extend(f"{pad}\t{line}" for line in nested.splitlines())
       else:
+         # item is CWRaw (a str subclass)
          lines.append(f"{pad}\t{item}")
    lines.append(f"{pad}}}")
    return "\n".join(lines)
@@ -189,7 +273,7 @@ def parse_text(text: str, path: Path | None = None) -> CWFile:
    """Parse Clausewitz script from a string."""
    tokens = _tokenize(text)
    root = _Parser(tokens).parse_block(root=True)
-   return CWFile(path=path or Path("<string>"), root=root)
+   return CWFile(path=path or Path(""), root=root)
 
 
 def parse_file(path: Path) -> CWFile:

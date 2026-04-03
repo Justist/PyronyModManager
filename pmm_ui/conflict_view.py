@@ -1,22 +1,55 @@
+"""
+conflict_view
+=============
+The "Conflicts" tab widget.
+
+Layout
+------
+  ┌──────────────────┬───────────────────────────────────────┐
+  │  [🔄 Scan]       │                                       │
+  │  [🔍 filter…   ] │   Select a conflicting file to see    │
+  │                  │        the diff.                      │
+  │  HARD conflicts  │   (or diff tabs once selected)        │
+  │   ├ mod A        │                                       │
+  │   └ mod B        │                                       │
+  │  SOFT conflicts  │                                       │
+  │   …              │                                       │
+  │  ─────────────── │                                       │
+  │  summary label   │                                       │
+  └──────────────────┴───────────────────────────────────────┘
+
+Phase 8 additions
+-----------------
+  • ConflictScanWorker for non-blocking scan
+  • Severity icons (🔴 HARD / 🟡 SOFT) in the tree
+  • Filter bar (case-insensitive substring match on file path)
+  • Summary label after scan
+  • Cancel in-progress scan when a new one starts
+"""
+
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import (
-   QLabel, QPushButton, QProgressBar, QSplitter, QTabWidget, QTextEdit,
-   QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QHeaderView,
-)
+from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
+                               QPushButton, QSplitter, QTabWidget, QTextEdit, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 import pmm_services
 from pmm_models import Mod
-from pmm_services import DefinitionDiff
+from pmm_services import (
+   ConflictScanWorker, ConflictSeverity, DefinitionDiff, FileConflict,
+)
 
+
+# ── tree-item payload types ───────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class _FileNodeData:
    kind: str  # "file"
    rel_path: str
    owners: list[Mod]
+   severity: ConflictSeverity
 
 
 @dataclass(frozen=True)
@@ -26,40 +59,61 @@ class _ModNodeData:
    mod: Mod
 
 
+# ── ConflictView ──────────────────────────────────────────────────────────────
+
 class ConflictView(QWidget):
    def __init__(self, parent: QWidget | None = None) -> None:
       super().__init__(parent)
 
-      # ── left panel: conflict tree ────────────────────────────────────────
-      scan_btn = QPushButton("🔄  Scan for conflicts")
-      scan_btn.clicked.connect(self._scan)
+      # ── toolbar ──────────────────────────────────────────────────────────
+      self._scan_btn = QPushButton("🔄 Scan for conflicts")
+      self._scan_btn.clicked.connect(self._scan)
 
-      # tiny loading bar shown while scanning for conflicts
+      self._filter = QLineEdit()
+      self._filter.setPlaceholderText("🔍  Filter files…")
+      self._filter.setClearButtonEnabled(True)
+      self._filter.textChanged.connect(self._apply_filter)
+
+      toolbar = QHBoxLayout()
+      toolbar.addWidget(self._scan_btn)
+      toolbar.addWidget(self._filter, stretch=1)
+
+      # ── progress bar (indeterminate, hidden most of the time) ────────────
       self._progress = QProgressBar()
-      self._progress.setMaximumHeight(10)
-      self._progress.setRange(0, 0)  # indeterminate
+      self._progress.setMaximumHeight(8)
+      self._progress.setTextVisible(False)
       self._progress.hide()
 
+      # ── status label (shown below the toolbar while scanning) ────────────
+      self._status = QLabel("")
+      self._status.setStyleSheet("color: #888; font-size: 11px;")
+
+      # ── conflict tree ─────────────────────────────────────────────────────
       self._tree = QTreeWidget()
-      self._tree.setHeaderLabels(["File / Mod", "Info"])
-      # Column sizing: give "Info" only what it needs, let "File / Mod" take the rest.
-      header = self._tree.header()
-      header.setStretchLastSection(False)
-      header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-      header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+      self._tree.setHeaderLabels(["File", "Severity"])
+      h = self._tree.header()
+      h.setStretchLastSection(False)
+      h.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+      h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
       self._tree.itemSelectionChanged.connect(self._on_selection)
+
+      # ── summary ───────────────────────────────────────────────────────────
+      self._summary = QLabel("")
+      self._summary.setStyleSheet("color: #aaa; font-size: 11px; padding: 2px 0;")
 
       left = QWidget()
       ll = QVBoxLayout(left)
       ll.setContentsMargins(0, 0, 4, 0)
-      ll.addWidget(scan_btn)
+      ll.addLayout(toolbar)
       ll.addWidget(self._progress)
-      ll.addWidget(self._tree)
+      ll.addWidget(self._status)
+      ll.addWidget(self._tree, stretch=1)
+      ll.addWidget(self._summary)
 
-      # ── right panel: tabbed diff views ───────────────────────────────────
-      self._right_placeholder = QLabel("Select a conflicting file to see the diff.")
-      self._right_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-      self._right_placeholder.setStyleSheet("color: #888;")
+      # ── right panel ───────────────────────────────────────────────────────
+      self._placeholder = QLabel("Select a conflicting file to see the diff.")
+      self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+      self._placeholder.setStyleSheet("color: #888;")
 
       self._diff_tabs = QTabWidget()
       self._diff_tabs.hide()
@@ -67,10 +121,10 @@ class ConflictView(QWidget):
       right = QWidget()
       rl = QVBoxLayout(right)
       rl.setContentsMargins(4, 0, 0, 0)
-      rl.addWidget(self._right_placeholder)
+      rl.addWidget(self._placeholder)
       rl.addWidget(self._diff_tabs)
 
-      # ── splitter ─────────────────────────────────────────────────────────
+      # ── splitter ──────────────────────────────────────────────────────────
       splitter = QSplitter(Qt.Orientation.Horizontal)
       splitter.addWidget(left)
       splitter.addWidget(right)
@@ -82,43 +136,121 @@ class ConflictView(QWidget):
       root_layout.addWidget(splitter)
 
       self._mods: list[Mod] = []
-      self._conflicts: dict[str, list[Mod]] = {}
+      self._conflicts: dict[str, FileConflict] = {}
+      self._worker: ConflictScanWorker | None = None
 
-   # ── public ───────────────────────────────────────────────────────────────
+   # ── public ────────────────────────────────────────────────────────────────
 
    def set_mods(self, mods: list[Mod]) -> None:
       self._mods = mods
 
-   # ── scan ─────────────────────────────────────────────────────────────────
+   # ── scan ──────────────────────────────────────────────────────────────────
 
    def _scan(self) -> None:
+      # Cancel any running scan before starting a new one.
+      if self._worker and self._worker.isRunning():
+         self._worker.cancel()
+         self._worker.wait()
+
       self._tree.clear()
       self._clear_diff_panel()
+      self._conflicts = {}
+      self._summary.setText("")
+      self._filter.clear()
 
-      # show tiny loading bar while scanning
+      self._progress.setRange(0, 0)  # indeterminate
       self._progress.show()
-      self._progress.repaint()  # ensure immediate visual update
+      self._scan_btn.setEnabled(False)
+      self._status.setText("Scanning mods…")
 
-      try:
-         self._conflicts = pmm_services.detect_file_conflicts(self._mods)
-      finally:
-         self._progress.hide()
+      self._worker = ConflictScanWorker(self._mods, parent=self)
+      self._worker.progress.connect(self._on_progress)
+      self._worker.finished.connect(self._on_scan_finished)
+      self._worker.error.connect(self._on_scan_error)
+      self._worker.start()
 
-      if not self._conflicts:
-         QTreeWidgetItem(self._tree, ["✓  No conflicts found", ""])
+   def _on_progress(self, done: int, total: int, phase: str) -> None:
+      if total > 0:
+         self._progress.setRange(0, total)
+         self._progress.setValue(done)
+      label = "Scanning mods" if phase == "scanning" else "Classifying conflicts"
+      if total:
+         self._status.setText(f"{label}… ({done}/{total})")
+      else:
+         self._status.setText(f"{label}…")
+
+   def _on_scan_finished(self, conflicts: object) -> None:
+      result: dict[str, FileConflict] = conflicts  # type: ignore[assignment]
+      self._progress.hide()
+      self._scan_btn.setEnabled(True)
+      self._status.setText("")
+      self._conflicts = result
+      self._populate_tree(result)
+
+   def _on_scan_error(self, msg: str) -> None:
+      self._progress.hide()
+      self._scan_btn.setEnabled(True)
+      self._status.setText(f"⚠ Scan failed: {msg}")
+
+   # ── tree population ───────────────────────────────────────────────────────
+
+   def _populate_tree(self, conflicts: dict[str, FileConflict]) -> None:
+      self._tree.clear()
+
+      if not conflicts:
+         QTreeWidgetItem(self._tree, ["✓ No conflicts found", ""])
+         self._summary.setText("No conflicts.")
          return
 
-      for rel_path, owners in sorted(self._conflicts.items()):
-         top = QTreeWidgetItem([rel_path, f"{len(owners)} mods"])
-         top.setForeground(0, Qt.GlobalColor.red)
-         top.setData(0, Qt.ItemDataRole.UserRole, _FileNodeData("file", rel_path, owners))
-         for mod in owners:
+      hard_count = sum(1 for fc in conflicts.values() if fc.severity == ConflictSeverity.HARD)
+      soft_count = len(conflicts) - hard_count
+
+      for rel_path, fc in sorted(conflicts.items()):
+         is_hard = fc.severity == ConflictSeverity.HARD
+         icon = "🔴" if is_hard else "🟡"
+         label = "hard" if is_hard else "soft"
+         color = QColor("#e07070") if is_hard else QColor("#cc9900")
+
+         top = QTreeWidgetItem([rel_path, f"{icon} {len(fc.owners)} mods · {label}"])
+         top.setForeground(0, color)
+         top.setForeground(1, color)
+         top.setData(0, Qt.ItemDataRole.UserRole,
+                     _FileNodeData("file", rel_path, fc.owners, fc.severity))
+
+         for mod in fc.owners:
             child = QTreeWidgetItem([f"  {mod.name}", ""])
-            child.setData(0, Qt.ItemDataRole.UserRole, _ModNodeData("mod", rel_path, mod))
+            child.setData(0, Qt.ItemDataRole.UserRole,
+                          _ModNodeData("mod", rel_path, mod))
             top.addChild(child)
+
+         # Show conflicting definition names as tooltip
+         if fc.conflicting_defs:
+            top.setToolTip(
+               0,
+               "Conflicting definitions:\n" + "\n".join(
+                  f"  • {d}" for d in fc.conflicting_defs[:20])
+               + ("\n  …" if len(fc.conflicting_defs) > 20 else ""),
+            )
+
          self._tree.addTopLevelItem(top)
 
       self._tree.expandAll()
+      self._summary.setText(
+         f"{len(conflicts)} conflict{'s' if len(conflicts) != 1 else ''} — "
+         f"🔴 {hard_count} hard (definition), 🟡 {soft_count} soft (file only)"
+      )
+
+      # Re-apply any active filter text.
+      self._apply_filter(self._filter.text())
+
+   # ── filter ────────────────────────────────────────────────────────────────
+
+   def _apply_filter(self, text: str) -> None:
+      q = text.strip().lower()
+      for i in range(self._tree.topLevelItemCount()):
+         item = self._tree.topLevelItem(i)
+         if item:
+            item.setHidden(bool(q) and q not in item.text(0).lower())
 
    # ── selection ─────────────────────────────────────────────────────────────
 
@@ -126,33 +258,28 @@ class ConflictView(QWidget):
       items = self._tree.selectedItems()
       if not items:
          return
-
       data = items[0].data(0, Qt.ItemDataRole.UserRole)
       if data is None:
          return
 
-      # Typed node payloads improve readability over raw tuples.
       if isinstance(data, _FileNodeData) and data.kind == "file":
          self._show_diff_for_owners(data.rel_path, data.owners)
+
       elif isinstance(data, _ModNodeData) and data.kind == "mod":
-         owners = self._conflicts.get(data.rel_path, [])
-         clicked = data.mod
-         others = [m for m in owners if m is not clicked]
+         fc = self._conflicts.get(data.rel_path)
+         owners = fc.owners if fc else []
+         others = [m for m in owners if m is not data.mod]
          if others:
-            # For now show the first other mod vs the clicked one.
-            self._show_diff_for_owners(data.rel_path, [others[0], clicked])
+            self._show_diff_for_owners(data.rel_path, [others[0], data.mod])
 
    # ── diff panel ────────────────────────────────────────────────────────────
 
    def _show_diff_for_owners(self, rel_path: str, owners: list[Mod]) -> None:
-      """Build one diff tab per adjacent pair of owners."""
       self._clear_diff_panel()
       for mod_a, mod_b in zip(owners, owners[1:]):
          tab = _DiffTab(rel_path, mod_a, mod_b)
-         # Use full names so the tab text width matches the complete label.
          self._diff_tabs.addTab(tab, f"{mod_a.name} → {mod_b.name}")
-
-      self._right_placeholder.hide()
+      self._placeholder.hide()
       self._diff_tabs.show()
 
    def _clear_diff_panel(self) -> None:
@@ -162,25 +289,25 @@ class ConflictView(QWidget):
          if w:
             w.deleteLater()
       self._diff_tabs.hide()
-      self._right_placeholder.show()
+      self._placeholder.show()
 
 
 # ── _DiffTab ──────────────────────────────────────────────────────────────────
 
 class _DiffTab(QWidget):
    """
-   Per-mod-pair tab with two sub-panels:
-     Top    – structural (definition-level) diff tree from pmm_clausewitz
-     Bottom – raw unified diff, or definition diff when a row is selected
+   Per-mod-pair tab.
+
+   Top panel   – structural diff tree (definition-level, from pmm_clausewitz)
+   Bottom tabs – Unified diff (full file) / Definition diff (per selected row)
    """
 
-   # status → human label and color; reused across instances
-   _STATUS_LABEL = {
+   _STATUS_LABEL: dict[str, str] = {
       "changed": "changed",
       "only_in_a": "only in {a}",
       "only_in_b": "only in {b}",
    }
-   _STATUS_COLOR = {
+   _STATUS_COLOR: dict[str, QColor] = {
       "changed": QColor("#e0a020"),
       "only_in_a": QColor("#e07070"),
       "only_in_b": QColor("#70b870"),
@@ -197,23 +324,21 @@ class _DiffTab(QWidget):
       # structural diff tree
       self._def_tree = QTreeWidget()
       self._def_tree.setHeaderLabels(["Definition", "Status"])
-      # Column sizing: minimal width for "Status", rest for "Definition".
-      def_header = self._def_tree.header()
-      def_header.setStretchLastSection(False)
-      def_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-      def_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+      dh = self._def_tree.header()
+      dh.setStretchLastSection(False)
+      dh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+      dh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
       self._def_tree.itemSelectionChanged.connect(self._on_def_selected)
 
-      # bottom text area — shows full-file diff by default,
-      # switches to definition diff when a row is selected
+      # unified diff (full file)
       self._unified_edit = QTextEdit()
       self._unified_edit.setReadOnly(True)
       self._unified_edit.setFont(mono)
 
+      # definition diff (populated on row selection)
       self._def_diff_edit = QTextEdit()
       self._def_diff_edit.setReadOnly(True)
       self._def_diff_edit.setFont(mono)
-      self._def_diff_edit.hide()
 
       self._bottom_tabs = QTabWidget()
       self._bottom_tabs.addTab(self._unified_edit, "Unified diff (full file)")
@@ -232,26 +357,24 @@ class _DiffTab(QWidget):
       self._populate()
 
    def _populate(self) -> None:
-      """Fill the definition tree and unified diff for this file/mod pair."""
       diffs = pmm_services.get_definition_diffs(
          self._rel_path, self._mod_a, self._mod_b
       )
+      a_name = self._mod_a.name
+      b_name = self._mod_b.name
 
       if diffs:
-         a_name = self._mod_a.name
-         b_name = self._mod_b.name
          for dd in diffs:
-            label_template = self._STATUS_LABEL.get(dd.status, dd.status)
-            status_label = label_template.format(a=a_name, b=b_name)
+            template = self._STATUS_LABEL.get(dd.status, dd.status)
+            status_label = template.format(a=a_name, b=b_name)
             item = QTreeWidgetItem([dd.def_id, status_label])
             item.setForeground(1, self._STATUS_COLOR.get(dd.status, QColor("#aaa")))
             item.setData(0, Qt.ItemDataRole.UserRole, dd)
             self._def_tree.addTopLevelItem(item)
       else:
-         QTreeWidgetItem(
-            self._def_tree,
-            ["(no definition-level differences)", ""],
-         )
+         # Either not a CW text file or no definition-level differences.
+         note = "(no parseable definitions — see unified diff)"
+         QTreeWidgetItem(self._def_tree, [note, ""])
 
       diff_text = pmm_services.get_unified_diff(
          self._rel_path, self._mod_a, self._mod_b
@@ -262,13 +385,13 @@ class _DiffTab(QWidget):
       )
 
    def _on_def_selected(self) -> None:
+      import difflib
       items = self._def_tree.selectedItems()
       if not items:
          return
       dd: DefinitionDiff | None = items[0].data(0, Qt.ItemDataRole.UserRole)
       if dd is None:
          return
-      import difflib
       lines_a = (dd.text_a + "\n").splitlines(keepends=True) if dd.text_a else []
       lines_b = (dd.text_b + "\n").splitlines(keepends=True) if dd.text_b else []
       mini_diff = "".join(difflib.unified_diff(
@@ -276,7 +399,6 @@ class _DiffTab(QWidget):
          fromfile=self._mod_a.name,
          tofile=self._mod_b.name,
       ))
-      self._def_diff_edit.show()
       _render_diff(self._def_diff_edit, mini_diff or "(identical)")
       self._bottom_tabs.setCurrentWidget(self._def_diff_edit)
 

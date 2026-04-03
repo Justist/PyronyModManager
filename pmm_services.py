@@ -1,15 +1,32 @@
+"""
+pmm_services
+============
+Business logic: load-order resolution, file-level conflict detection,
+definition-level (deep) conflict analysis, and background workers.
+
+Phase 8 additions
+-----------------
+  ConflictSeverity   — HARD (same definition ID overwritten) / SOFT (file only)
+  FileConflict       — dataclass with rel_path, owners, severity, conflicting_defs
+  detect_file_conflicts_ex() — file scan + severity in one call
+  ConflictScanWorker — QThread wrapper; emits progress + finished
+"""
+
 import contextlib
 import difflib
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
-from pmm_clausewitz import CWPair
+from PySide6.QtCore import QThread, Signal
+
+from pmm_clausewitz import CWPair, parse_text, unparse_pair
 from pmm_models import Mod, ModCollection
 
 
-# ── existing functions (unchanged) ───────────────────────────────────────────
+# ── load-order resolution ─────────────────────────────────────────────────────
 
 def resolve_load_order(mods: List[Mod], collection: ModCollection) -> List[Mod]:
    """Return mods in collection order, filtering to enabled only."""
@@ -18,52 +35,7 @@ def resolve_load_order(mods: List[Mod], collection: ModCollection) -> List[Mod]:
    return [m for m in ordered if m.enabled]
 
 
-def detect_file_conflicts(mods: List[Mod]) -> Dict[str, List[Mod]]:
-   """
-  Walk each mod's directory and map relative_path → [mods that provide it].
-
-  Ignores:
-    * any directory whose name starts with a dot (".git", ".idea", …)
-    * the top-level "descriptor.mod" file
-    * (for now) common binary/image files (.png, .dds, .jpg, .jpeg, .tga, .bmp, .gif, .webp)
-
-  Returns only paths present in more than one mod.
-  """
-   # Extensions treated as binary/image and skipped from conflict detection
-   skip_exts = {
-      ".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".webp", ".wav"
-   }
-
-   file_owners: Dict[str, List[Mod]] = defaultdict(list)
-
-   for mod in mods:
-      root = mod.path
-      if not root.is_dir():
-         continue
-
-      for f in root.rglob("*"):
-         # Skip any path that has a dot-folder in its parents
-         if any(part.startswith(".") for part in f.relative_to(root).parts):
-            continue
-
-         if not f.is_file():
-            continue
-
-         rel_path = f.relative_to(root)
-
-         # Skip some top-level files
-         if str(rel_path).lower() in {"descriptor.mod", "changeLog.txt"}:
-            continue
-
-         # Skip image/binary extensions
-         if f.suffix.lower() in skip_exts:
-            continue
-
-         rel = str(rel_path)
-         file_owners[rel].append(mod)
-
-   return {k: v for k, v in file_owners.items() if len(v) > 1}
-
+# ── legacy launcher helper (kept for backward compat) ────────────────────────
 
 def apply_load_order_to_launcher(
       game_user_data: Path, collection: ModCollection
@@ -79,17 +51,147 @@ def apply_load_order_to_launcher(
    (game_user_data / "dlc_load.json").write_text(json.dumps(dlc_load, indent=2))
 
 
-# ── Phase 4: deep conflict analysis ──────────────────────────────────────────
+# ── extensions ────────────────────────────────────────────────────────────────
+
+# Files with these extensions are skipped during file-level conflict scanning.
+_BINARY_EXTS = frozenset({
+   ".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".webp",
+   ".wav", ".ogg", ".mp3", ".wem",
+   ".mesh", ".anim", ".asset",
+})
+
+# Files with these extensions are Clausewitz text and can be deep-diffed.
+_CW_TEXT_EXTS = frozenset({
+   ".txt", ".cfg", ".gui", ".gfx", ".sfx",
+   ".mod", ".map",
+})
+
+# All text extensions we may encounter (CW + data formats).
+_ALL_TEXT_EXTS = _CW_TEXT_EXTS | frozenset({
+   ".csv", ".yml", ".yaml", ".json", ".lua", ".shader", ".fxh",
+})
+
+
+# ── severity ──────────────────────────────────────────────────────────────────
+
+class ConflictSeverity(Enum):
+   HARD = "hard"  # ≥2 mods define the same named definition in the same file
+   SOFT = "soft"  # file overlap only — no definition-level conflict detected
+
+
+@dataclass
+class FileConflict:
+   """A file that exists in more than one mod, with severity metadata."""
+   rel_path: str
+   owners: List[Mod]
+   severity: ConflictSeverity
+   # Definition keys that appear in ≥2 mods (non-empty only for HARD).
+   conflicting_defs: List[str] = field(default_factory=list)
+
+
+# ── file-level conflict scan ──────────────────────────────────────────────────
+
+def _collect_file_owners(mods: List[Mod]) -> Dict[str, List[Mod]]:
+   """
+   Walk every mod's directory and return owners for each relevant file.
+
+   Returns a dict of relative path → list of Mods that contain that file.
+
+   Skipped:
+     • dot-directories (.git, .idea, …)
+     • descriptor.mod / changelog.txt at the root
+     • binary / image files
+   """
+   file_owners: Dict[str, List[Mod]] = defaultdict(list)
+   for mod in mods:
+      root = mod.path
+      if not root.is_dir():
+         continue
+      for f in root.rglob("*"):
+         rel = f.relative_to(root)
+         if any(part.startswith(".") for part in rel.parts):
+            continue
+         if not f.is_file():
+            continue
+         if str(rel).lower() in {"descriptor.mod", "changelog.txt"}:
+            continue
+         if f.suffix.lower() in _BINARY_EXTS:
+            continue
+         file_owners[str(rel)].append(mod)
+   return file_owners
+
+
+def detect_file_conflicts(mods: List[Mod]) -> Dict[str, List[Mod]]:
+   """
+   Walk every mod's directory and return paths present in more than one mod.
+   Returns  dict[relative_path_str → list[Mod]].
+   """
+   file_owners = _collect_file_owners(mods)
+   return {k: v for k, v in file_owners.items() if len(v) > 1}
+
+
+def detect_file_conflicts_ex(mods: List[Mod]) -> Dict[str, FileConflict]:
+   """
+   File-level conflict scan + severity classification.
+
+   Same as detect_file_conflicts() but each result is a FileConflict with:
+     severity = HARD  when ≥2 mods define the same named definition
+     severity = SOFT  for plain file overlaps (or non-CW text files)
+
+   Use ConflictScanWorker for non-blocking execution in the UI.
+   """
+   raw = detect_file_conflicts(mods)
+   result: Dict[str, FileConflict] = {}
+   for rel_path, owners in raw.items():
+      severity, conflicting_defs = _classify_severity(rel_path, owners)
+      result[rel_path] = FileConflict(rel_path, owners, severity, conflicting_defs)
+   return result
+
+
+def _classify_severity(
+      rel_path: str, owners: List[Mod]
+) -> Tuple[ConflictSeverity, List[str]]:
+   """
+   Determine whether a multi-mod file overlap is a HARD or SOFT conflict.
+
+   HARD: the file is a Clausewitz text file and ≥2 mods define the same
+         top-level definition key (by name/id/token/…).
+   SOFT: everything else.
+
+   Returns (severity, conflicting_def_keys).
+   """
+   suffix = Path(rel_path).suffix.lower()
+   if suffix not in _CW_TEXT_EXTS:
+      return ConflictSeverity.SOFT, []
+
+   key_counts: Counter[str] = Counter()
+   for mod in owners:
+      path = mod.path / rel_path
+      if not path.is_file():
+         continue
+      with contextlib.suppress(Exception):
+         text = path.read_text(encoding="utf-8-sig", errors="replace")
+         cw = parse_text(text, path)
+         for k in cw.definition_names():
+            key_counts[k] += 1
+
+   conflicting = sorted(k for k, n in key_counts.items() if n > 1)
+   if conflicting:
+      return ConflictSeverity.HARD, conflicting
+   return ConflictSeverity.SOFT, []
+
+
+# ── unified diff ──────────────────────────────────────────────────────────────
 
 @dataclass
 class DefinitionDiff:
    """
-   Describes a single top-level definition that differs between two mod files.
+   A single top-level definition that differs between two mod files.
 
    status:
      "changed"   – present in both mods but with different content
      "only_in_a" – present only in mod_a
-     "only_in_b" – present only in mod_b (new definition added by mod_b)
+     "only_in_b" – present only in mod_b
    """
    def_id: str
    status: str
@@ -99,8 +201,8 @@ class DefinitionDiff:
 
 def get_unified_diff(rel_path: str, mod_a: Mod, mod_b: Mod) -> str:
    """
-   Return a unified diff string comparing rel_path as found in mod_a vs mod_b.
-   Returns an empty string if either file is missing or unreadable.
+   Return a unified diff string comparing rel_path in mod_a vs mod_b.
+   Returns "" if either file is missing or unreadable.
    """
    path_a = mod_a.path / rel_path
    path_b = mod_b.path / rel_path
@@ -113,55 +215,53 @@ def get_unified_diff(rel_path: str, mod_a: Mod, mod_b: Mod) -> str:
       return ""
    return "".join(
       difflib.unified_diff(
-         lines_a,
-         lines_b,
+         lines_a, lines_b,
          fromfile=f"{mod_a.name}/{rel_path}",
          tofile=f"{mod_b.name}/{rel_path}",
       )
    )
 
 
-def get_definition_diffs(rel_path: str, mod_a: Mod, mod_b: Mod) -> List[DefinitionDiff]:
+def get_definition_diffs(
+      rel_path: str, mod_a: Mod, mod_b: Mod
+) -> List[DefinitionDiff]:
    """
-   Parse rel_path from both mods with the Clausewitz parser and return a list
-   of top-level definitions that differ between them.
+   Parse rel_path from both mods and return definitions that differ.
 
-   Binary files (DDS, OGG, TGA, …) are not parsed; they return a single
-   placeholder entry so the diff tab still appears.
+   Non-CW text files (JSON, YAML, CSV, …) get a raw unified diff only;
+   binary files return a single placeholder entry.
    """
-   from pmm_clausewitz import parse_text, unparse_pair
-
-   _TEXT_EXTS = {
-      ".txt", ".cfg", ".gui", ".gfx", ".asset", ".sfx",
-      ".mod", ".map", ".csv", ".yml", ".yaml",
-   }
    suffix = Path(rel_path).suffix.lower()
-   if suffix not in _TEXT_EXTS:
-      return [DefinitionDiff(
-         def_id="<binary>",
-         status="changed",
-         text_a=f"(binary file in {mod_a.name})",
-         text_b=f"(binary file in {mod_b.name})",
-      )]
+
+   if suffix in _BINARY_EXTS:
+      return [
+         DefinitionDiff(
+            def_id="",
+            status="changed",
+            text_a=f"(binary file in {mod_a.name})",
+            text_b=f"(binary file in {mod_b.name})",
+         )
+      ]
+
+   if suffix not in _CW_TEXT_EXTS:
+      # Not parseable as CW script — signal caller to use unified diff only
+      return []
 
    defs_a: Dict[str, CWPair] = {}
    defs_b: Dict[str, CWPair] = {}
-   path_a = mod_a.path / rel_path
-   path_b = mod_b.path / rel_path
 
-   def _load_defs(path: Path, target: Dict[str, CWPair]) -> None:
+   def _load(path: Path, target: Dict[str, CWPair]) -> None:
       if not path.is_file():
          return
       with contextlib.suppress(Exception):
          text = path.read_text(encoding="utf-8-sig", errors="replace")
          target.update(parse_text(text, path).definitions())
 
-   _load_defs(path_a, defs_a)
-   _load_defs(path_b, defs_b)
+   _load(mod_a.path / rel_path, defs_a)
+   _load(mod_b.path / rel_path, defs_b)
 
    result: List[DefinitionDiff] = []
-   all_keys = sorted(set(defs_a) | set(defs_b))
-   for key in all_keys:
+   for key in sorted(set(defs_a) | set(defs_b)):
       pair_a = defs_a.get(key)
       pair_b = defs_b.get(key)
       ta = unparse_pair(pair_a) if pair_a is not None else ""
@@ -177,3 +277,88 @@ def get_definition_diffs(rel_path: str, mod_a: Mod, mod_b: Mod) -> List[Definiti
       result.append(DefinitionDiff(def_id=key, status=status, text_a=ta, text_b=tb))
 
    return result
+
+
+# ── background conflict scanner ───────────────────────────────────────────────
+
+class ConflictScanWorker(QThread):
+   """
+   Background thread that runs a full conflict scan (file + severity).
+
+   Signals
+   -------
+   progress(done: int, total: int, phase: str)
+       Emitted periodically during the scan so the UI can show a progress
+       indicator.  `phase` is one of "scanning" or "classifying".
+
+   finished(conflicts: dict[str, FileConflict])
+       Emitted once when the scan completes successfully.
+
+   error(message: str)
+       Emitted if an unhandled exception occurs.
+
+   Usage
+   -----
+   worker = ConflictScanWorker(mods, parent=self)
+   worker.progress.connect(self._on_progress)
+   worker.finished.connect(self._on_finished)
+   worker.error.connect(self._on_error)
+   worker.start()
+
+   To cancel a running scan call worker.cancel(); the worker will stop at
+   the next mod boundary and emit finished({}).
+   """
+
+   progress = Signal(int, int, str)  # (done, total, phase)
+   finished = Signal(object)  # dict[str, FileConflict]
+   error = Signal(str)
+
+   def __init__(self, mods: List[Mod], parent=None) -> None:
+      super().__init__(parent)
+      self._mods = mods
+      self._cancelled = False
+
+   def cancel(self) -> None:
+      """Request early termination.  Does not block."""
+      self._cancelled = True
+
+   def run(self) -> None:
+      try:
+         result = self._run_scan()
+         self.finished.emit(result)
+      except Exception as exc:  # noqa: BLE001
+         self.error.emit(str(exc))
+
+   def _run_scan(self) -> Dict[str, FileConflict]:
+      mods = self._mods
+      total = len(mods)
+
+      # ── Phase 1: file-level scan ──────────────────────────────────────────
+      file_owners: Dict[str, List[Mod]] = defaultdict(list)
+
+      for i, mod in enumerate(mods):
+         if self._cancelled:
+            return {}
+         self.progress.emit(i, total, "scanning")
+         # Reuse the same filtering logic as detect_file_conflicts
+         for rel_path, owners in _collect_file_owners([mod]).items():
+            file_owners[rel_path].extend(owners)
+
+      self.progress.emit(total, total, "scanning")
+
+      conflicts = {k: v for k, v in file_owners.items() if len(v) > 1}
+
+      # ── Phase 2: severity classification ─────────────────────────────────
+      result: Dict[str, FileConflict] = {}
+      items = list(conflicts.items())
+      n = len(items)
+
+      for j, (rel_path, owners) in enumerate(items):
+         if self._cancelled:
+            return {}
+         self.progress.emit(j, n, "classifying")
+         severity, conflicting_defs = _classify_severity(rel_path, owners)
+         result[rel_path] = FileConflict(rel_path, owners, severity, conflicting_defs)
+
+      self.progress.emit(n, n, "classifying")
+      return result
