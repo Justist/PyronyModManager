@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Union
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
@@ -7,19 +7,19 @@ from PySide6.QtWidgets import (
    QPushButton, QStatusBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
-import pmm_games
-import pmm_launcher
-import pmm_parser
-import pmm_services
-import pmm_storage
-import pmm_updater
-from pmm_models import Game, ModCollection, Preferences
-from pmm_ui.collection_dialogs import CollectionNameDialog
-from pmm_ui.conflict_view import ConflictView
-from pmm_ui.mod_list import ModListWidget
-from pmm_ui.settings_dialog import SettingsDialog
-from pmm_ui.update_banner import UpdateBanner
-from pmm_watcher import ModWatcher
+import pmm.core.games as games
+import pmm.core.launcher as launcher
+import pmm.core.parser as parser
+import pmm.core.services as services
+import pmm.core.storage as storage
+import pmm.core.updater as updater
+from pmm.core.models import Game, ModCollection, Preferences
+from pmm.ui.collection_dialogs import CollectionNameDialog
+from pmm.ui.conflict_view import ConflictView
+from pmm.ui.mod_list import ModListWidget
+from pmm.ui.settings_dialog import SettingsDialog
+from pmm.ui.update_banner import UpdateBanner
+from pmm.core.watcher import ModWatcher
 
 
 class MainWindow(QMainWindow):
@@ -28,9 +28,9 @@ class MainWindow(QMainWindow):
       self.setWindowTitle("Pyrony Mod Manager")
       self.resize(960, 680)
 
-      self._prefs: Preferences = pmm_storage.load_or_default(Preferences, "prefs.json")
+      self._prefs: Preferences = storage.load_or_default(Preferences, "prefs.json")
       self._all_mods = []
-      self._update_checker: pmm_updater.UpdateChecker
+      self._update_checker: updater.UpdateChecker
       self._watcher: ModWatcher
 
       # ── top bar ─────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
       self._settings_btn.setFixedWidth(32)
       self._settings_btn.setToolTip("Settings")
 
-      for g in pmm_games.KNOWN_GAMES:
+      for g in games.KNOWN_GAMES:
          self._game_box.addItem(g.display_name, userData=g.id)
       if self._prefs.active_game_id:
          idx = self._game_box.findData(self._prefs.active_game_id)
@@ -123,15 +123,15 @@ class MainWindow(QMainWindow):
    def _start_update_check(self) -> None:
       if not self._prefs.check_for_updates:
          return
-      self._update_checker = pmm_updater.UpdateChecker(parent=self)
+      self._update_checker = updater.UpdateChecker(parent=self)
       self._update_checker.update_available.connect(self._on_update_available)
       self._update_checker.check_failed.connect(
          lambda msg: self.statusBar().showMessage(f"Update check failed: {msg}", 5000)
       )
       self._update_checker.start()
 
-   def _on_update_available(self, info: object) -> None:
-      release: pmm_updater.ReleaseInfo = info  # type: ignore[assignment]
+   def _on_update_available(self, info: updater.ReleaseInfo) -> None:
+      release: updater.ReleaseInfo = info
       self._update_banner.show_update(release.version, release.html_url)
 
    # ── settings ─────────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ class MainWindow(QMainWindow):
    def _on_settings(self) -> None:
       dlg = SettingsDialog(self._prefs, parent=self)
       if dlg.exec() == SettingsDialog.DialogCode.Accepted:
-         pmm_storage.save(self._prefs, "prefs.json")
+         storage.save(self._prefs, "prefs.json")
          self._refresh_game()
          self.statusBar().showMessage("Settings saved.")
 
@@ -164,12 +164,12 @@ class MainWindow(QMainWindow):
 
    def _on_game_changed(self, _) -> None:
       self._prefs.active_game_id = self._game_box.currentData()
-      pmm_storage.save(self._prefs, "prefs.json")
+      storage.save(self._prefs, "prefs.json")
       self._refresh_game()
 
    def _on_collection_changed(self, _) -> None:
       self._prefs.active_collection = self._coll_box.currentData() or ""
-      pmm_storage.save(self._prefs, "prefs.json")
+      storage.save(self._prefs, "prefs.json")
       self._refresh_list()
       self._refresh_coll_buttons()
 
@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
       coll = self._active_collection()
       if coll:
          coll.mods = new_order
-         pmm_storage.save(self._prefs, "prefs.json")
+         storage.save(self._prefs, "prefs.json")
 
    # ── collection CRUD ───────────────────────────────────────────────────────
 
@@ -188,7 +188,7 @@ class MainWindow(QMainWindow):
          return
       new_coll = ModCollection(name=dlg.name, game_id=self._prefs.active_game_id)
       self._prefs.collections.append(new_coll)
-      pmm_storage.save(self._prefs, "prefs.json")
+      storage.save(self._prefs, "prefs.json")
       self._repopulate_coll_box(select=dlg.name)
       self.statusBar().showMessage(f'Collection "{dlg.name}" created.')
 
@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
       coll.name = dlg.name
       if self._prefs.active_collection == old_name:
          self._prefs.active_collection = dlg.name
-      pmm_storage.save(self._prefs, "prefs.json")
+      storage.save(self._prefs, "prefs.json")
       self._repopulate_coll_box(select=dlg.name)
       self.statusBar().showMessage(f'Renamed "{old_name}" → "{dlg.name}".')
 
@@ -229,7 +229,7 @@ class MainWindow(QMainWindow):
       ]
       if self._prefs.active_collection == name:
          self._prefs.active_collection = ""
-      pmm_storage.save(self._prefs, "prefs.json")
+      storage.save(self._prefs, "prefs.json")
       self._repopulate_coll_box()
       self.statusBar().showMessage(f'Collection "{name}" deleted.')
 
@@ -247,7 +247,7 @@ class MainWindow(QMainWindow):
       user should set an override in Settings.
       """
       coll = self._active_collection()
-      game = pmm_games.get_game(self._prefs.active_game_id)
+      game = games.get_game(self._prefs.active_game_id)
       if not coll or not game:
          self.statusBar().showMessage(
             "Select a game and collection first.", 4000
@@ -255,7 +255,7 @@ class MainWindow(QMainWindow):
          return None
 
       # Resolve path early so we can warn *before* creating the directory.
-      user_data = pmm_games.get_effective_user_data(game, self._prefs.game_paths)
+      user_data = games.get_effective_user_data(game, self._prefs.game_paths)
       if user_data is None:
          QMessageBox.warning(
             self,
@@ -268,7 +268,7 @@ class MainWindow(QMainWindow):
       path_existed = user_data.exists()
 
       try:
-         written_to = pmm_launcher.write_launcher_files(
+         written_to = launcher.write_launcher_files(
             game, coll, self._all_mods,
             game_paths=self._prefs.game_paths,
          )
@@ -290,7 +290,7 @@ class MainWindow(QMainWindow):
             "If your game stores data elsewhere, open Settings and set "
             "the correct user-data path for this game.",
          )
-      pmm_storage.save(self._prefs, "prefs.json")
+      storage.save(self._prefs, "prefs.json")
       return game, written_to
 
    def _on_apply(self) -> None:
@@ -304,7 +304,7 @@ class MainWindow(QMainWindow):
          return
       game, _ = result
       try:
-         pmm_launcher.launch_game(game)
+         launcher.launch_game(game)
          self.statusBar().showMessage(f"Launching {game.display_name}…", 5000)
       except Exception as exc:
          QMessageBox.critical(self, "Launch error", str(exc))
@@ -312,12 +312,12 @@ class MainWindow(QMainWindow):
    # ── refresh helpers ───────────────────────────────────────────────────────
 
    def _refresh_game(self) -> None:
-      game = pmm_games.get_game(self._prefs.active_game_id)
+      game = games.get_game(self._prefs.active_game_id)
       self._all_mods = []
       if game:
-         mod_dir = pmm_games.get_mod_dir(game)
+         mod_dir = games.get_mod_dir(game)
          if mod_dir and mod_dir.exists():
-            self._all_mods = pmm_parser.discover_mods(mod_dir)
+            self._all_mods = parser.discover_mods(mod_dir)
             self.statusBar().showMessage(
                f"Loaded {len(self._all_mods)} mods from {mod_dir}"
             )
@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
       ordered = coll.mods if coll else []
       self._mod_list_widget.load_mods(self._all_mods, ordered)
       ordered_mods = (
-         pmm_services.resolve_load_order(self._all_mods, coll)
+         services.resolve_load_order(self._all_mods, coll)
          if coll else self._all_mods
       )
       self._conflict_view.set_mods(ordered_mods)
@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
 
    # ── helpers ───────────────────────────────────────────────────────────────
 
-   def _active_collection(self) -> ModCollection | None:
+   def _active_collection(self) -> Union[ModCollection, None]:
       name = self._coll_box.currentData()
       return next(
          (

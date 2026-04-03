@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (
    QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-import pmm_games
-from pmm_models import Preferences
+import pmm.core.games as games
+from pmm.core.models import Preferences
 
 
 class SettingsDialog(QDialog):
@@ -39,7 +39,7 @@ class SettingsDialog(QDialog):
       )
       form = QFormLayout(group)
 
-      for game in pmm_games.KNOWN_GAMES:
+      for game in games.KNOWN_GAMES:
          override = self._prefs.game_paths.get(game.id, "")
          detected = str(game.user_data_path) if game.user_data_path else ""
 

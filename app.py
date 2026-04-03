@@ -1,6 +1,6 @@
 import sys
 from PySide6.QtWidgets import QApplication
-from pmm_ui.main_window import MainWindow
+from pmm.ui.main_window import MainWindow
 
 
 def main() -> None:

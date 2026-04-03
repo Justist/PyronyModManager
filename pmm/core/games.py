@@ -2,7 +2,7 @@ import platform
 from pathlib import Path
 from typing import Dict, List
 
-from pmm_models import Game
+from pmm.core.models import Game
 
 
 def _docs() -> Path:

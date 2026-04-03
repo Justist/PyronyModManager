@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
-from pmm_models import Mod
+from pmm.core.models import Mod
 
 # Clausewitz key=value / key="value" / key={ list } pattern
 _KV = re.compile(r'^(\w+)\s*=\s*(?:"([^"]*)"|{([^}]*)}|(\S+))', re.MULTILINE)

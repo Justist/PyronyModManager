@@ -48,8 +48,6 @@ Real table names in the launcher DB:  playsets, playsets_mods, mods
   playsets_mods.position INTEGER  — 0-based load order index
 """
 
-from __future__ import annotations
-
 import json
 import platform
 import shutil
@@ -58,9 +56,10 @@ import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, List
 
-import pmm_games
-from pmm_models import Game, Mod, ModCollection
+import pmm.core.games as games
+from pmm.core.models import Game, Mod, ModCollection
 
 
 # ── public API ────────────────────────────────────────────────────────────────
@@ -68,8 +67,8 @@ from pmm_models import Game, Mod, ModCollection
 def write_launcher_files(
       game: Game,
       collection: ModCollection,
-      all_mods: list[Mod],
-      game_paths: dict[str, str] | None = None,
+      all_mods: List[Mod],
+      game_paths: Dict[str, str] | None = None,
 ) -> Path:
    """
    Write all load-order files for *collection* and update the launcher DB.
@@ -80,7 +79,7 @@ def write_launcher_files(
    Returns the user-data directory that was written to.
    Raises RuntimeError when no user-data path is resolvable.
    """
-   user_data = pmm_games.get_effective_user_data(game, game_paths or {})
+   user_data = games.get_effective_user_data(game, game_paths or {})
    if user_data is None:
       raise RuntimeError(
          f"No user-data path configured for {game.display_name}.\n"

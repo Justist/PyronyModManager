@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
    QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from pmm_models import Mod
+from pmm.core.models import Mod
 
 
 # ── Multi-item drag-drop tree (active list) ───────────────────────────────────

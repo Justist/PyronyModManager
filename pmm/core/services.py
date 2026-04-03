@@ -23,8 +23,8 @@ from typing import Dict, List, Tuple
 
 from PySide6.QtCore import QThread, Signal
 
-from pmm_clausewitz import CWPair, parse_text, unparse_pair
-from pmm_models import Mod, ModCollection
+from pmm.core.clausewitz import CWPair, parse_text, unparse_pair
+from pmm.core.models import Mod, ModCollection
 
 
 # ── load-order resolution ─────────────────────────────────────────────────────

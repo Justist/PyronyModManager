@@ -35,10 +35,10 @@ from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPro
                                QPushButton, QSplitter, QTabWidget, QTextEdit, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
-import pmm_services
-from pmm_models import Mod
-from pmm_services import (
+from pmm.core.models import Mod
+from pmm.core.services import (
    ConflictScanWorker, ConflictSeverity, DefinitionDiff, FileConflict,
+   get_definition_diffs, get_unified_diff
 )
 
 
@@ -203,7 +203,7 @@ class ConflictView(QWidget):
          return
 
       hard_count = sum(1 for fc in conflicts.values() if fc.severity == ConflictSeverity.HARD)
-      soft_count = len(conflicts) - hard_count
+      soft_count = sum(bool(fc.severity == ConflictSeverity.HARD) for fc in conflicts.values())
 
       for rel_path, fc in sorted(conflicts.items()):
          is_hard = fc.severity == ConflictSeverity.HARD
@@ -357,7 +357,7 @@ class _DiffTab(QWidget):
       self._populate()
 
    def _populate(self) -> None:
-      diffs = pmm_services.get_definition_diffs(
+      diffs = get_definition_diffs(
          self._rel_path, self._mod_a, self._mod_b
       )
       a_name = self._mod_a.name
@@ -376,7 +376,7 @@ class _DiffTab(QWidget):
          note = "(no parseable definitions — see unified diff)"
          QTreeWidgetItem(self._def_tree, [note, ""])
 
-      diff_text = pmm_services.get_unified_diff(
+      diff_text = get_unified_diff(
          self._rel_path, self._mod_a, self._mod_b
       )
       _render_diff(
