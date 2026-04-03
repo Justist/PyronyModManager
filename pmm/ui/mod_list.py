@@ -393,10 +393,11 @@ class ModListWidget(QWidget):
       QDesktopServices.openUrl(url)
 
    def _open_mod_workshop(self, mod: Mod) -> None:
-      """Open the mod's Steam Workshop page, if it has a remote_id."""
+      """Open the mod's Steam Workshop page in the Steam client, if possible."""
       if not mod.remote_id:
          return
-      url = QUrl(f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod.remote_id}")
+      # Use Steam URI so the Steam client handles it.
+      url = QUrl(f"steam://url/CommunityFilePage/{mod.remote_id}")
       QDesktopServices.openUrl(url)
 
    def _update_labels(self) -> None:
