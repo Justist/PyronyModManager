@@ -63,7 +63,7 @@ class _MultiDragList(QTreeWidget):
       for row in reversed(selected_rows):
          self.takeTopLevelItem(row)
 
-      rows_above = sum(1 for r in selected_rows if r < target)
+      rows_above = sum(r < target for r in selected_rows)
       insert_at = max(0, min(target - rows_above, self.topLevelItemCount()))
 
       for offset, snap in enumerate(snapshots):
@@ -73,7 +73,7 @@ class _MultiDragList(QTreeWidget):
 
       event.setDropAction(Qt.DropAction.IgnoreAction)
       event.accept()
-      self._renumber()
+      self.renumber()
       self.items_reordered.emit()
 
    def _target_row(self, pos) -> int:
@@ -84,7 +84,7 @@ class _MultiDragList(QTreeWidget):
       rect = self.visualRect(index)
       return index.row() + (1 if pos.y() >= rect.center().y() else 0)
 
-   def _renumber(self) -> None:
+   def renumber(self) -> None:
       """Update the left index column to show 1-based load order."""
       for row in range(self.topLevelItemCount()):
          it = self.topLevelItem(row)
@@ -206,7 +206,7 @@ class ModListWidget(QWidget):
       self._apply_filter(self._search.text())
 
       # Renumber active items after initial load
-      self._active._renumber()
+      self._active.renumber()
 
       # After population, lock the Supported column width and let Mod stretch
       header = self._avail.header()
@@ -259,9 +259,7 @@ class ModListWidget(QWidget):
             _make_active_item(self._mods[mid], checked=True)
          )
 
-      self._active._renumber()
-      self._update_labels()
-      self._emit_order()
+      self._sync_after_active_change()
 
    def _on_active_changed(self, item: QTreeWidgetItem, column: int) -> None:
       """Unchecking in the active playset moves the item back to available."""
@@ -281,7 +279,11 @@ class ModListWidget(QWidget):
          self._active.takeTopLevelItem(row)
       self._avail.addTopLevelItem(_make_avail_item(self._mods[mid], checked=False))
 
-      self._active._renumber()
+      self._sync_after_active_change()
+
+   def _sync_after_active_change(self) -> None:
+      """Common post-change logic for active/available list updates."""
+      self._active.renumber()
       self._update_labels()
       self._emit_order()
 
@@ -301,9 +303,7 @@ class ModListWidget(QWidget):
             continue
          self._active.insertTopLevelItem(row - 1, item)
          item.setSelected(True)
-      self._loading = False
-      self._active._renumber()
-      self._emit_order()
+      self._finalize_move()
 
    def _move_down(self) -> None:
       rows = sorted(
@@ -320,8 +320,12 @@ class ModListWidget(QWidget):
             continue
          self._active.insertTopLevelItem(row + 1, item)
          item.setSelected(True)
+      self._finalize_move()
+
+   def _finalize_move(self) -> None:
+      """Shared tail for _move_up/_move_down after reordering items."""
       self._loading = False
-      self._active._renumber()
+      self._active.renumber()
       self._emit_order()
 
    # ── filter ────────────────────────────────────────────────────────────────
@@ -362,7 +366,7 @@ class ModListWidget(QWidget):
 def _make_active_item(mod: Mod, checked: bool) -> QTreeWidgetItem:
    """
    Create a QTreeWidgetItem for the active-playset tree (two columns):
-     column 0: order number (1-based; filled/updated by _renumber)
+     column 0: order number (1-based; filled/updated by renumber)
      column 1: mod label with checkbox
    """
    label = f"{mod.name}  [{mod.supported_version}]" if mod.supported_version else mod.name
