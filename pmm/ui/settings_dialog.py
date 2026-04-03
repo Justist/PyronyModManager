@@ -4,7 +4,7 @@ from typing import Dict
 from PySide6.QtWidgets import (
    QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
    QFormLayout, QGroupBox, QHBoxLayout,
-   QLineEdit, QPushButton, QVBoxLayout, QWidget,
+   QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 import pmm.core.games as games
@@ -71,9 +71,26 @@ class SettingsDialog(QDialog):
    def _build_app_group(self) -> QGroupBox:
       group = QGroupBox("Application")
       layout = QVBoxLayout(group)
+
       self._update_check = QCheckBox("Check for updates on startup")
       self._update_check.setChecked(self._prefs.check_for_updates)
+
+      # Font size setting
+      font_row = QWidget()
+      font_layout = QHBoxLayout(font_row)
+      font_layout.setContentsMargins(0, 0, 0, 0)
+      font_label = QLineEdit("Font size (pt):")
+      font_label.setReadOnly(True)
+      font_label.setFrame(False)
+      font_label.setStyleSheet("color: palette(text); background: transparent;")
+      self._font_spin = QSpinBox()
+      self._font_spin.setRange(8, 24)
+      self._font_spin.setValue(self._prefs.font_size or 10)
+      font_layout.addWidget(font_label)
+      font_layout.addWidget(self._font_spin)
+
       layout.addWidget(self._update_check)
+      layout.addWidget(font_row)
       return group
 
    def _build_buttons(self) -> QDialogButtonBox:
@@ -99,4 +116,5 @@ class SettingsDialog(QDialog):
          if edit.text().strip()
       }
       self._prefs.check_for_updates = self._update_check.isChecked()
+      self._prefs.font_size = int(self._font_spin.value())
       self.accept()

@@ -46,6 +46,8 @@ class Preferences:
    language: str = "en"
    check_for_updates: bool = True
    theme: str = "dark"
+   # Base UI font size in points; applied to the mod list entries.
+   font_size: int = 10
    collections: List[ModCollection] = field(default_factory=list)
    # Per-game user-data path overrides set by the Settings dialog.
    # Keys are Game.id; values are absolute path strings.

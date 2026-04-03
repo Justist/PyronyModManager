@@ -83,6 +83,9 @@ class MainWindow(QMainWindow):
       # ── tabs ─────────────────────────────────────────────────────────────
       self._tabs = QTabWidget()
       self._mod_list_widget = ModListWidget()
+      # Apply stored font size to mod list entries.
+      if getattr(self._prefs, "font_size", 0):
+         self._mod_list_widget.set_font_size(self._prefs.font_size)
       self._conflict_view = ConflictView()
       self._tabs.addTab(self._mod_list_widget, "Load Order")
       self._tabs.addTab(self._conflict_view, "Conflicts")
@@ -140,6 +143,9 @@ class MainWindow(QMainWindow):
       dlg = SettingsDialog(self._prefs, parent=self)
       if dlg.exec() == SettingsDialog.DialogCode.Accepted:
          storage.save(self._prefs, "prefs.json")
+         # Re-apply font size and reload game state.
+         if getattr(self._prefs, "font_size", 0):
+            self._mod_list_widget.set_font_size(self._prefs.font_size)
          self._refresh_game()
          self.statusBar().showMessage("Settings saved.")
 

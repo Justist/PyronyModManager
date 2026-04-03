@@ -1,7 +1,7 @@
 from typing import Dict, List
 
 from PySide6.QtCore import QPoint, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QDropEvent
+from PySide6.QtGui import QDesktopServices, QDropEvent, QFont
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMenu, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                                QWidget)
@@ -191,6 +191,32 @@ class ModListWidget(QWidget):
       self.set_active_enabled(False)
 
    # ── public API ────────────────────────────────────────────────────────────
+
+   def set_font_size(self, points: int) -> None:
+      """
+      Apply a base font size to the mod lists and adjust row height.
+      """
+      if points <= 0:
+         return
+      f = self.font()
+      f.setPointSize(points)
+      self.setFont(f)
+      self._avail.setFont(f)
+      self._active.setFont(f)
+      self._avail_label.setFont(f)
+      self._active_label.setFont(f)
+      self._search.setFont(f)
+
+      # Approximate row height: 1.6× font point size in pixels.
+      row_height = int(points * 1.6)
+      self._avail.setStyleSheet(
+         f"QTreeWidget {{ font-size: {points}pt; }} "
+         f"QTreeView::item {{ height: {row_height}px; }}"
+      )
+      self._active.setStyleSheet(
+         f"QTreeWidget {{ font-size: {points}pt; }} "
+         f"QTreeView::item {{ height: {row_height}px; }}"
+      )
 
    def load_mods(self, mods: List[Mod], ordered_ids: List[str]) -> None:
       self._mods = {m.id: m for m in mods}
