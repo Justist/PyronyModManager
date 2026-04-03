@@ -379,14 +379,15 @@ class ModListWidget(QWidget):
 
       You can type:
         • just words → match mod name (case-insensitive)
-            "ai fix"        → name contains "ai fix"
+            "ai fix"        → name contains "ai" and "fix"
         • version=... → match supported version
-            "version=4.3"  → supported version contains "4.3"
+            "version=4.3"   → supported version contains "4.3"
             "version=4*"    → supported version starts with "4" (4.0, 4.1, …)
             "version=*"     → any non-empty supported version
-        • Combine with and/or (case-insensitive)
-            "ai and version=4.3"
-            "ai or graphics"
+        • Combine with && / ||:
+            "ai && version=4.3"
+            "dyn over ui && version=4*"
+            "ai || graphics"
 
       Advanced (optional):
         • name~/regex/      → name matches regex
@@ -422,25 +423,25 @@ class ModListWidget(QWidget):
       """
       Parse query string into a list of (op, predicate) tuples.
 
-      - op is "and" or "or"
+      - Operators: && (AND), || (OR)
       - The first term defaults to "and"
       - Evaluation is left-to-right
       """
       parts: List[Tuple[str, str]] = []
       rest = query
 
-      # Split on "and"/"or" words, ignoring case. Allow any amount of whitespace.
+      # Split on && / ||, allowing surrounding whitespace.
       while rest:
-         m = re.search(r"\b(and|or)\b", rest, flags=re.IGNORECASE)
+         m = re.search(r"\s*(&&|\|\|)\s*", rest)
          if not m:
             term = rest.strip()
             if term:
                parts.append(("and", term))
             break
-         op = m.group(1).lower()
+         op_token = m.group(1)
          term = rest[: m.start()].strip()
          if term:
-            parts.append(("and" if not parts else op, term))
+            parts.append(("and" if not parts else ("and" if op_token == "&&" else "or"), term))
          rest = rest[m.end():]
 
       predicates: List[Tuple[str, Callable]] = []
@@ -482,42 +483,76 @@ class ModListWidget(QWidget):
       # version=... spec: match supported_version only, with '*' wildcard.
       # Examples:
       #   version=4*   → supported_version starts with "4" (4, 4.1, 4.2, …)
-      #   version=*    → any non-empty supported_version
-      #   version=4.3 → substring match "4.3" in supported_version
+      #   version=*    → any supported_version (including empty ones)
+      #   version=4.3  → substring match "4.3" in supported_version
       if term.lower().startswith("version="):
          raw = term[len("version="):].strip()
-         # Empty pattern → match any non-empty supported_version.
+
+         def sv_get(mod: Mod) -> str:
+            return mod.supported_version or ""
+
+         # Mods that declare a generic version like "*", "v*", "V*" should
+         # always be considered a match for any version filter (even empty).
+         def _is_generic_version(s: str) -> bool:
+            s = s.strip()
+            return s.startswith("*") or s.lower().startswith("v*")
+
+         def _matches_any_version(mod: Mod) -> bool:
+            s = sv_get(mod)
+            return bool(s) and _is_generic_version(s)
+
+         # Empty pattern → match any supported_version (including empty),
+         # plus any generic version (*, v*, V*).
          if not raw:
-            return lambda mod: bool(mod.supported_version)
+            return lambda mod: True
 
-         sv_get = lambda mod: (mod.supported_version or "")
+         # Wrap the real predicate so generic versions are always included.
+         def _wrap(pred):
+            return lambda mod: _matches_any_version(mod) or pred(mod)
 
-         # If pattern contains '*', treat it as a simple wildcard:
-         # we only support a single '*' anywhere (start, middle, end).
+         # If pattern contains '*', treat it as a wildcard anywhere in the string.
+         # Examples:
+         #   "4*"   → versions starting with "4"   (4, 4.0, 4.1, 4.10, …)
+         #   "4.*"  → also versions starting with "4" or "v4"
+         #   "*4.1" → anything that ends with "4.1"
          if "*" in raw:
             # Escape everything except '*', then replace '*' with '.*'
-            # and anchor at start to make "4*" intuitive.
             pattern = ""
             for ch in raw:
                if ch == "*":
                   pattern += ".*"
                else:
                   pattern += re.escape(ch)
-            # Case-insensitive regex
+
+            if pattern and pattern[0].isdigit():
+               pattern = "[vV]?" + pattern
+
             try:
-               rx = re.compile("^" + pattern + "$", flags=re.IGNORECASE)
+               rx = re.compile(pattern, flags=re.IGNORECASE)
             except re.error:
                return lambda _m: False
 
-            return lambda mod: bool(sv_get(mod)) and bool(rx.match(sv_get(mod)))
+            return _wrap(lambda mod: bool(sv_get(mod)) and bool(rx.search(sv_get(mod))))
          else:
             # No wildcard: simple case-insensitive substring match.
             value = raw.lower()
-            return lambda mod: value in sv_get(mod).lower()
+            return _wrap(lambda mod: value in sv_get(mod).lower())
 
-      # Fallback: plain text against name (case-insensitive substring)
-      value = term.lower()
-      return lambda mod: value in (mod.name or "").lower()
+      # Fallback: plain text against name, with implied wildcards between words.
+      # Example:
+      #   "ui dyn"  → matches "UI Overhaul Dynamic"
+      #   "dyn ui"  → also matches "UI Overhaul Dynamic"
+      # All words must appear somewhere in the name, in any order.
+      words = [w for w in term.lower().split() if w]
+
+      if not words:
+         return lambda _m: True
+
+      def _name_matches(mod: Mod) -> bool:
+         name = (mod.name or "").lower()
+         return all(w in name for w in words)
+
+      return _name_matches
 
    def _match_mod(self, mod: Mod, predicates: List[Tuple[str, Callable]]) -> bool:
       """Evaluate predicates left-to-right with AND/OR semantics."""
@@ -565,10 +600,11 @@ class ModListWidget(QWidget):
          "        version=4.3   → supported version contains 4.3\n"
          "        version=4*     → supported version starts with 4 (4.0, 4.1, …)\n"
          "        version=*      → any non-empty supported version\n"
-         "  • Combine with and/or (case-insensitive).\n"
+         "  • Combine with && / ||.\n"
          "      Examples:\n"
-         "        ai and version=4.3\n"
-         "        ai or graphics\n\n"
+         "        ai && version=1.11\n"
+         "        dyn over ui && version=4*\n"
+         "        ai || graphics\n\n"
          "Advanced (optional):\n"
          "  • name~/regex/      → name matches regex\n"
          "  • version~/regex/   → supported version matches regex\n"
