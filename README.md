@@ -43,8 +43,8 @@ auto-detected on Windows and Linux. You can override the path for any game in
 
 | Dependency | Why |
 |---|---|
-| Python ≥ 3.14 | Match PySide6 ≥ 6.10.1 support |
-| `PySide6 >= 6.10.1` | Qt 6 UI (LGPL) |
+| Python ≥ 3.14 | Most recent Python version |
+| `PySide6 >= 6.10.1` | Qt 6 UI (LGPL) which supports Python ≥ 3.14 |
 | `msgspec` | Fast JSON serialisation for preferences |
 | `httpx` | HTTP client for the update checker |
 | `watchfiles` | Efficient mod-directory hot-reload |
@@ -294,7 +294,7 @@ in any way. Use at your own risk. Always back up your save files and mods before
 
 Pyrony Mod Manager has largely been made using genAI, including Claude Sonnet 4.6, Sourcery, and GitHub Copilot. 
 AI usage includes code generation, refactoring, documentation, and understanding the code of Irony Mod Manager.
-If you have any moral objections to AI-generated code, please consider using Irony Mod Manager instead.
+If you have any moral or otherwise objections to AI-generated code, please consider using Irony Mod Manager instead.
 
 ---
 
