@@ -1,0 +1,4 @@
+While in a venv:
+pyinstaller --onefile --name PyronyModManager --paths . --hidden-import pmm app.py
+
+A .exe will then appear in the dist/ folder
