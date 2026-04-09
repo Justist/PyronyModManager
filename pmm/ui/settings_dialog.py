@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
    QFormLayout, QGroupBox, QHBoxLayout,
    QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
+from pmm.ui.dependencies_dialog import DependenciesDialog
 
 import pmm.core.games as games
 from pmm.core.models import Preferences
@@ -89,8 +90,13 @@ class SettingsDialog(QDialog):
       font_layout.addWidget(font_label)
       font_layout.addWidget(self._font_spin)
 
+      # Dependencies editor button
+      dep_btn = QPushButton("Edit mod dependencies")
+      dep_btn.clicked.connect(self._edit_dependencies)
+
       layout.addWidget(self._update_check)
       layout.addWidget(font_row)
+      layout.addWidget(dep_btn)
       return group
 
    def _build_buttons(self) -> QDialogButtonBox:
@@ -108,6 +114,17 @@ class SettingsDialog(QDialog):
             self, "Select game user-data folder", start
       ):
          edit.setText(path)
+
+   def _edit_dependencies(self) -> None:
+      """Open the dependencies editor dialog for the current active game."""
+      # Use the active game from prefs; if not set, do nothing.
+      game_id = self._prefs.active_game_id
+      if not game_id:
+         return
+      dlg = DependenciesDialog(self._prefs, game_id, parent=self)
+      if dlg.exec() == QDialog.DialogCode.Accepted:
+         # The dialog should mutate prefs.user_dependencies in-place.
+         pass
 
    def _on_accept(self) -> None:
       self._prefs.game_paths = {

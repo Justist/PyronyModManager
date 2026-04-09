@@ -186,17 +186,53 @@ def detect_file_conflicts_ex(mods: List[Mod]) -> Dict[str, FileConflict]:
    return result
 
 
-def _classify_severity(
-      rel_path: str, owners: List[Mod]
-) -> Tuple[ConflictSeverity, List[str]]:
+def _owners_form_dependency_chain(owners: List[Mod]) -> bool:
+   """
+   Return True if every pair of overlapping mods is connected by a dependency:
+   i.e. for any two owners A,B, either A depends (directly) on B or B depends on A.
+
+   This is a heuristic: we only look at the current owners and their immediate
+   dependencies. If they *can* be ordered by load order to make sense, we treat
+   the conflict as load-order-solvable.
+   """
+   if len(owners) < 2:
+      return False
+
+   # Use mod.id to compare, because Mod.dependencies may contain names or ids
+   id_to_mod = {m.id: m for m in owners}
+   # Build a quick lookup: mod.id -> set of ids it depends on (restricted to owners)
+   depends_on: dict[str, set[str]] = {}
+   for m in owners:
+      deps: set[str] = set()
+      for d in m.dependencies:
+         # dependency may be recorded as id or name; try both
+         for candidate in owners:
+            if d in [candidate.id, candidate.name]:
+               deps.add(candidate.id)
+      if deps:
+         depends_on[m.id] = deps
+
+   # For every unordered pair (A,B), require A→B or B→A
+   ids = [m.id for m in owners]
+   for i, a in enumerate(ids):
+      for b in ids[i + 1 :]:
+         deps_a = depends_on.get(a, set())
+         deps_b = depends_on.get(b, set())
+         if b not in deps_a and a not in deps_b:
+            return False
+   return True
+
+
+def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[ConflictSeverity, List[str]]:
    """
    Determine whether a multi-mod file overlap is a HARD or SOFT conflict.
 
    HARD: the file is a Clausewitz text file and ≥2 mods define the same
-         top-level definition key (by name/id/token/…).
-   SOFT: everything else.
+         top-level definition key (by name/id/token/…),
+         and the overlap is *not* explained purely by declared dependencies.
 
-   Returns (severity, conflicting_def_keys).
+   SOFT: everything else (binary/non-CW, no overlapping definitions, or
+         overlaps only between mods that depend on each other).
    """
    suffix = Path(rel_path).suffix.lower()
    if suffix not in _CW_TEXT_EXTS:
@@ -210,10 +246,13 @@ def _classify_severity(
       for k in _cached_definition_names(path):
          key_counts[k] += 1
 
-   conflicting = sorted(k for k, n in key_counts.items() if n > 1)
-   if conflicting:
-      return ConflictSeverity.HARD, conflicting
-   return ConflictSeverity.SOFT, []
+   if conflicting := sorted(k for k, n in key_counts.items() if n > 1):
+      # If all owners are related by dependencies, treat as SOFT — load order can solve it.
+      return ((ConflictSeverity.SOFT,
+               []) if _owners_form_dependency_chain(owners) else
+              (ConflictSeverity.HARD, conflicting))
+   else:
+      return ConflictSeverity.SOFT, []
 
 
 # ── unified diff ──────────────────────────────────────────────────────────────

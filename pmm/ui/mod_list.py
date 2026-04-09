@@ -439,21 +439,16 @@ class ModListWidget(QWidget):
       while rest:
          m = re.search(r"\s*(&&|\|\|)\s*", rest)
          if not m:
-            term = rest.strip()
-            if term:
+            if term := rest.strip():
                parts.append(("and", term))
             break
-         op_token = m.group(1)
-         term = rest[: m.start()].strip()
-         if term:
-            parts.append(("and" if not parts else ("and" if op_token == "&&" else "or"), term))
+         op_token = m[1]
+         if term := rest[:m.start()].strip():
+            parts.append((("and" if op_token == "&&" else "or") if parts else "and", term))
          rest = rest[m.end():]
 
-      predicates: List[Tuple[str, Callable]] = []
-      for op, term in parts:
-         if not term:
-            continue
-         predicates.append((op, self._make_term_pred(term)))
+      predicates: List[Tuple[str, Callable]] = [(op, self._make_term_pred(term))
+                                                for op, term in parts if term]
       return predicates
 
    def _make_term_pred(self, term: str):
@@ -470,8 +465,8 @@ class ModListWidget(QWidget):
       # Regex forms: name~/.../ or version~/.../
       m = re.fullmatch(r"(name|version)~/(.*)/", term, flags=re.IGNORECASE)
       if m:
-         field = m.group(1).lower()
-         pattern = m.group(2)
+         field = m[1].lower()
+         pattern = m[2]
          try:
             rx = re.compile(pattern, flags=re.IGNORECASE)
          except re.error:
@@ -524,13 +519,9 @@ class ModListWidget(QWidget):
             # Escape everything except '*', then replace '*' with '.*'
             pattern = ""
             for ch in raw:
-               if ch == "*":
-                  pattern += ".*"
-               else:
-                  pattern += re.escape(ch)
-
+               pattern += ".*" if ch == "*" else re.escape(ch)
             if pattern and pattern[0].isdigit():
-               pattern = "[vV]?" + pattern
+               pattern = f"[vV]?{pattern}"
 
             try:
                rx = re.compile(pattern, flags=re.IGNORECASE)
@@ -565,10 +556,7 @@ class ModListWidget(QWidget):
          return True
       result = predicates[0][1](mod)
       for op, pred in predicates[1:]:
-         if op == "and":
-            result = result and pred(mod)
-         else:  # "or"
-            result = result or pred(mod)
+         result = result and pred(mod) if op == "and" else result or pred(mod)
       return result
 
    # ── helpers ───────────────────────────────────────────────────────────────

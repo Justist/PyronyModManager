@@ -53,3 +53,6 @@ class Preferences:
    # Keys are Game.id; values are absolute path strings.
    # Missing keys fall back to the auto-detected path in pmm_games.
    game_paths: Dict[str, str] = field(default_factory=dict)
+   # User-defined dependencies: game_id → { mod_id → [dep_mod_id, …] }.
+   # These are merged with descriptor.mod dependencies and apply to all playsets.
+   user_dependencies: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)

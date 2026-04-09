@@ -16,7 +16,7 @@ import pmm.core.playset_io as playset_io
 import pmm.core.services as services
 import pmm.core.storage as storage
 import pmm.core.updater as updater
-from pmm.core.models import Game, ModCollection, Preferences
+from pmm.core.models import Game, Mod, ModCollection, Preferences
 from pmm.core.watcher import ModWatcher
 from pmm.ui.collection_dialogs import CollectionNameDialog
 from pmm.ui.conflict_view import ConflictView
@@ -233,14 +233,8 @@ class MainWindow(QMainWindow):
       dest = Path(path)
       total = len(coll.mods)
 
-      self._zip_progress_dlg = QProgressDialog(
-         f'Packing "{coll.name}"…', "", 0, total, self
-      )
-      assert self._zip_progress_dlg is not None
-      self._zip_progress_dlg.setWindowTitle("Export Playset")
-      self._zip_progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
-      self._zip_progress_dlg.setMinimumDuration(400)
-
+      self._init_zip_progress_dialog('Packing "', coll, total,
+                                     "Export Playset")
       self._zip_worker = playset_io.ZipExportWorker(
          coll, self._all_mods, dest, parent=self
       )
@@ -305,14 +299,8 @@ class MainWindow(QMainWindow):
       existing = self._collection_names_for_game()
       coll_name = self._unique_name(src.stem, existing)
 
-      self._zip_progress_dlg = QProgressDialog(
-         f'Extracting "{src.name}"…', "", 0, 0, self
-      )
-      assert self._zip_progress_dlg is not None
-      self._zip_progress_dlg.setWindowTitle("Import Playset")
-      self._zip_progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
-      self._zip_progress_dlg.setMinimumDuration(400)
-
+      self._init_zip_progress_dialog('Extracting "', src, 0,
+                                     "Import Playset")
       self._zip_worker = playset_io.ZipImportWorker(
          src, game_id, mod_dir, overwrite, coll_name, parent=self
       )
@@ -321,6 +309,14 @@ class MainWindow(QMainWindow):
       self._zip_worker.finished.connect(self._on_zip_import_done)
       self._zip_worker.error.connect(self._on_zip_worker_error)
       self._zip_worker.start()
+
+   def _init_zip_progress_dialog(self, arg0, arg1, arg2, arg3):
+      self._zip_progress_dlg = QProgressDialog(f'{arg0}{arg1.name}"…', "", 0,
+                                               arg2, self)
+      assert self._zip_progress_dlg is not None
+      self._zip_progress_dlg.setWindowTitle(arg3)
+      self._zip_progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
+      self._zip_progress_dlg.setMinimumDuration(400)
 
    def _on_zip_import_done(self, result: object) -> None:
       r: playset_io.ImportResult = result  # type: ignore[assignment]
@@ -437,10 +433,12 @@ class MainWindow(QMainWindow):
       self._refresh_coll_buttons()
 
    def _on_order_changed(self, new_order: list[str]) -> None:
-      coll = self._active_collection()
-      if coll:
+      if coll := self._active_collection():
          coll.mods = new_order
          storage.save(self._prefs, "prefs.json")
+         # Recompute dependency warning for the new order.
+         ordered_mods = services.resolve_load_order(self._all_mods, coll)
+         self._update_dependency_warning(ordered_mods)
 
    # ── collection CRUD ───────────────────────────────────────────────────────
 
@@ -571,19 +569,40 @@ class MainWindow(QMainWindow):
    def _refresh_game(self) -> None:
       game = games.get_game(self._prefs.active_game_id)
       self._all_mods = []
+
+      user_data: Path | None = None
       if game:
-         mod_dir = games.get_mod_dir(game)
+         user_data = games.get_effective_user_data(game, self._prefs.game_paths)
+         mod_dir = games.get_mod_dir(game, self._prefs.game_paths)
          if mod_dir and mod_dir.exists():
-            self._all_mods = parser.discover_mods(mod_dir)
-            self.statusBar().showMessage(
-               f"Loaded {len(self._all_mods)} mods from {mod_dir}"
-            )
-            self._start_watcher(mod_dir)
+            self._load_mods_for_game(mod_dir, game)
          else:
-            self.statusBar().showMessage(
-               f"Mod directory not found: {mod_dir}"
-            )
+            self.statusBar().showMessage(f"Mod directory not found: {mod_dir}")
+
+      # Let the Conflicts tab know where the user-data lives (or None if unknown).
+      self._conflict_view.set_game_user_data(user_data)
+
       self._repopulate_coll_box(select=self._prefs.active_collection or None)
+
+   def _load_mods_for_game(self, mod_dir, game):
+      self._all_mods = parser.discover_mods(mod_dir)
+
+      # Merge user-defined dependencies for this game into Mod.dependencies.
+      user_deps_for_game = self._prefs.user_dependencies.get(game.id, {})
+      by_id = {m.id: m for m in self._all_mods}
+      for mod in self._all_mods:
+         if extra := user_deps_for_game.get(mod.id, []):
+            # Keep dependencies unique and preserve existing descriptor ones.
+            existing = set(mod.dependencies)
+            for dep_id in extra:
+               if dep_id not in existing:
+                  mod.dependencies.append(dep_id)
+                  existing.add(dep_id)
+
+      self.statusBar().showMessage(
+         f"Loaded {len(self._all_mods)} mods from {mod_dir}"
+      )
+      self._start_watcher(mod_dir)
 
    def _repopulate_coll_box(self, select: str | None = None) -> None:
       """Rebuild the collection combo for the current game without cascading signals."""
@@ -610,6 +629,56 @@ class MainWindow(QMainWindow):
          if coll else self._all_mods
       )
       self._conflict_view.set_mods(ordered_mods)
+      # Update dependency-order warnings based on current load order.
+      self._update_dependency_warning(ordered_mods)
+
+   def _update_dependency_warning(self, ordered_mods: list[Mod]) -> None:
+      """
+      Warn when the active playset violates declared dependencies:
+      if A depends on B, B should appear earlier than A.
+      """
+      if not ordered_mods:
+         self._conflict_view.set_dependency_warning("")
+         return
+
+      id_to_index = {m.id: idx for idx, m in enumerate(ordered_mods)}
+      # Build a lookup by name as well, since descriptor dependencies
+      # may be stored as names.
+      name_to_id = {}
+      for m in ordered_mods:
+         # Prefer id; fall back to name
+         name_to_id.setdefault(m.name, m.id)
+
+      bad_pairs: list[tuple[str, str]] = []  # (dependent, dependency)
+
+      for m in ordered_mods:
+         idx = id_to_index.get(m.id, -1)
+         if idx < 0:
+            continue
+         for dep in m.dependencies:
+            # try by id, then by name
+            dep_id = dep if dep in id_to_index else name_to_id.get(dep)
+            if not dep_id or dep_id not in id_to_index:
+               continue
+            dep_idx = id_to_index[dep_id]
+            # dependency should be *before* dependent
+            if dep_idx > idx:
+               bad_pairs.append((m.name, next(d.name for d in ordered_mods if d.id == dep_id)))
+
+      if not bad_pairs:
+         self._conflict_view.set_dependency_warning("")
+         return
+
+      # Build a compact message; avoid spamming the user with a long list.
+      samples = bad_pairs[:5]
+      parts = [f"{dep} → {base}" for dep, base in samples]
+      extra = f" (and {len(bad_pairs) - 5} more)" if len(bad_pairs) > 5 else ""
+      msg = (
+            "Dependency order warning: some mods depend on others that are loaded after them. "
+            "Consider reordering your playset so dependencies come first. "
+            "Examples: " + ", ".join(parts) + extra
+      )
+      self._conflict_view.set_dependency_warning(msg)
 
    def _refresh_coll_buttons(self) -> None:
       has_coll = self._active_collection() is not None

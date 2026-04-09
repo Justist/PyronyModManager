@@ -128,9 +128,8 @@ _ID_KEYS = frozenset({
 def _inner_id(block: CWBlock) -> str | None:
    """Return the string value of the first identity key inside a block."""
    for item in block.items:
-      if isinstance(item, CWPair) and item.key in _ID_KEYS:
-         if isinstance(item.value, str):
-            return item.value
+      if isinstance(item, CWPair) and item.key in _ID_KEYS and isinstance(item.value, str):
+          return item.value
    return None
 
 
