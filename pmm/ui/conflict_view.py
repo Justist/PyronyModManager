@@ -29,9 +29,9 @@ Phase 8 additions
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Callable, Dict
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
                                QPushButton, QSplitter, QTabWidget, QTextEdit, QTreeWidget,
@@ -76,7 +76,7 @@ def _sorted_owners_by_dependency(owners: list[Mod]) -> list[Mod]:
    name_to_mod = {m.name: m for m in owners}
 
    # Build a simple "depends_on" set for quick lookup.
-   depends_on: dict[str, set[str]] = {}
+   depends_on: Dict[str, set[str]] = {}
    for m in owners:
       if deps := {d for d in m.dependencies if d in name_to_mod}:
          depends_on[m.name] = deps
@@ -107,9 +107,14 @@ def _sorted_owners_by_dependency(owners: list[Mod]) -> list[Mod]:
 # ── ConflictView ──────────────────────────────────────────────────────────────
 
 class ConflictView(QWidget):
+   # payload: (patch_folder_name, add_to_collection)
+   patch_created = Signal(str, bool)
+
    def __init__(self, parent: QWidget | None = None) -> None:
       super().__init__(parent)
       self._game_user_data: Path | None = None
+      # Optional callback that returns the current mods in the active playset.
+      self._mods_provider: Callable | None = None
 
       # ── toolbar ──────────────────────────────────────────────────────────
       self._scan_btn = QPushButton("🔄 Scan for conflicts")
@@ -205,6 +210,14 @@ class ConflictView(QWidget):
       self._summary.setText("")
       self._dep_warning.setText("")
 
+   def set_mods_provider(self, provider) -> None:
+      """
+      Set a callable that returns the current mods list in playset order.
+      Used to refresh the scan input right before scanning, so adding/removing
+      mods in the Load Order tab is always reflected.
+      """
+      self._mods_provider = provider
+
    def set_dependency_warning(self, text: str) -> None:
       """Show or clear a dependency-order warning."""
       self._dep_warning.setText(text)
@@ -220,6 +233,13 @@ class ConflictView(QWidget):
       if self._worker and self._worker.isRunning():
          self._worker.cancel()
          self._worker.wait()
+
+      # Always refresh the mods list from the provider, if available, so the
+      # scan reflects the current playset (after add/remove/reorder).
+      if self._mods_provider is not None:
+         mods = self._mods_provider()
+         if isinstance(mods, list):
+            self._mods = mods
 
       self._tree.clear()
       self._clear_diff_panel()
@@ -273,6 +293,7 @@ class ConflictView(QWidget):
          self._status.setText("⚠ Set a valid game user-data path before creating a patch.")
          return
       dlg = PatchDialog(self._conflicts, self._mods, self._game_user_data, parent=self)
+      dlg.patch_created.connect(self.patch_created)
       dlg.exec()
 
    # ── tree population ───────────────────────────────────────────────────────

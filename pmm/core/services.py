@@ -30,10 +30,9 @@ from pmm.core.models import Mod, ModCollection
 # ── load-order resolution ─────────────────────────────────────────────────────
 
 def resolve_load_order(mods: List[Mod], collection: ModCollection) -> List[Mod]:
-   """Return mods in collection order, filtering to enabled only."""
+   """Return mods in collection order; membership in the collection is the filter."""
    by_id = {m.id: m for m in mods}
-   ordered = [by_id[mid] for mid in collection.mods if mid in by_id]
-   return [m for m in ordered if m.enabled]
+   return [by_id[mid] for mid in collection.mods if mid in by_id]
 
 
 # ── legacy launcher helper (kept for backward compat) ────────────────────────
@@ -176,12 +175,17 @@ def detect_file_conflicts_ex(mods: List[Mod]) -> Dict[str, FileConflict]:
      severity = HARD  when ≥2 mods define the same named definition
      severity = SOFT  for plain file overlaps (or non-CW text files)
 
+   Comment-only differences (lines where the non-whitespace part starts
+   with '#') are ignored entirely and do not produce conflicts.
    Use ConflictScanWorker for non-blocking execution in the UI.
    """
    raw = detect_file_conflicts(mods)
    result: Dict[str, FileConflict] = {}
    for rel_path, owners in raw.items():
       severity, conflicting_defs = _classify_severity(rel_path, owners)
+      if severity is None:
+         # No real conflict (only comments/whitespace or dependency-only)
+         continue
       result[rel_path] = FileConflict(rel_path, owners, severity, conflicting_defs)
    return result
 
@@ -222,20 +226,39 @@ def _owners_form_dependency_chain(owners: List[Mod]) -> bool:
             return False
    return True
 
+def _strip_comment_only_lines(text: str) -> str:
+   """
+   Remove lines that are purely comments (any whitespace followed by '#')
+   and blank lines. Used to treat comment-only edits as no-op.
+   """
+   kept: List[str] = []
+   for line in text.splitlines():
+      stripped = line.lstrip()
+      if not stripped:
+         continue
+      if stripped.startswith("#"):
+         continue
+      kept.append(line)
+   return "\n".join(kept)
 
-def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[ConflictSeverity, List[str]]:
+def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[ConflictSeverity | None, List[str]]:
    """
    Determine whether a multi-mod file overlap is a HARD or SOFT conflict.
 
    HARD: the file is a Clausewitz text file and ≥2 mods define the same
          top-level definition key (by name/id/token/…),
-         and the overlap is *not* explained purely by declared dependencies.
+         and the overlap is *not* explained purely by declared dependencies,
+         and there is a real content change beyond comments/whitespace.
 
    SOFT: everything else (binary/non-CW, no overlapping definitions, or
          overlaps only between mods that depend on each other).
+
+   Returns (None, []) when the overlap should be ignored entirely
+   (e.g. only comment/whitespace differences).
    """
    suffix = Path(rel_path).suffix.lower()
    if suffix not in _CW_TEXT_EXTS:
+      # Non-CW text: we still show as SOFT file overlap when contents differ.
       return ConflictSeverity.SOFT, []
 
    key_counts: Counter[str] = Counter()
@@ -246,13 +269,34 @@ def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[ConflictSeveri
       for k in _cached_definition_names(path):
          key_counts[k] += 1
 
-   if conflicting := sorted(k for k, n in key_counts.items() if n > 1):
-      # If all owners are related by dependencies, treat as SOFT — load order can solve it.
-      return ((ConflictSeverity.SOFT,
-               []) if _owners_form_dependency_chain(owners) else
-              (ConflictSeverity.HARD, conflicting))
-   else:
+   conflicting = sorted(k for k, n in key_counts.items() if n > 1)
+   if not conflicting:
+      # No overlapping definitions at all → at most a SOFT file overlap.
       return ConflictSeverity.SOFT, []
+
+   # If all owners are related by dependencies, treat as SOFT — load order can solve it.
+   if _owners_form_dependency_chain(owners):
+      return ConflictSeverity.SOFT, []
+
+   # Additional check: if all owners' files are identical once comment-only
+   # lines and blank lines are stripped, then this is effectively a
+   # comment-only change and should be ignored completely.
+   contents: set[str] = set()
+   for mod in owners:
+      path = mod.path / rel_path
+      if not path.is_file():
+         continue
+      try:
+         raw = path.read_text(encoding="utf-8-sig", errors="replace")
+      except OSError:
+         continue
+      contents.add(_strip_comment_only_lines(raw))
+
+   if len(contents) <= 1:
+      # Only comment/whitespace differences → ignore entirely.
+      return None, []
+
+   return ConflictSeverity.HARD, conflicting
 
 
 # ── unified diff ──────────────────────────────────────────────────────────────

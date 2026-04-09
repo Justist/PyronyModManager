@@ -32,8 +32,16 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import contextlib
 
-from pmm.core.patch_solver import (apply_auto_resolutions, build_patch_plan, FilePatchPlan,
-                                   open_in_editor, ResolutionTask, Strategy, write_patch_mod)
+from pmm.core.patch_solver import (
+   apply_auto_resolutions,
+   build_patch_plan,
+   FilePatchPlan,
+   open_in_editor,
+   ResolutionTask,
+   Strategy,
+   write_patch_mod,
+   safe_folder_name,
+)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
@@ -56,7 +64,7 @@ class PatchDialog(QDialog):
                           write_patch_mod() succeeds.
    """
 
-   patch_created: Signal = Signal(str)
+   patch_created: Signal = Signal(str, bool)
 
    def __init__(
          self,
@@ -159,6 +167,19 @@ class PatchDialog(QDialog):
          QMessageBox.warning(self, "Name required", "Please enter a patch mod name.")
          return
 
+      patch_root = self._game_user_data / "mod" / safe_folder_name(patch_name)
+      if patch_root.exists():
+         reply = QMessageBox.question(
+            self,
+            "Patch mod exists",
+            f"A patch mod folder already exists:\n  {patch_root}\n\n"
+            "Overwrite it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+         )
+         if reply != QMessageBox.StandardButton.Yes:
+            return
+
       try:
          patch_root = write_patch_mod(
             self._plans,
@@ -172,11 +193,13 @@ class PatchDialog(QDialog):
 
       folder = patch_root.name
       add_to_coll = self._page_finish.add_to_collection()
-      msg = f"Patch mod written to:\\n{patch_root}"
+      msg = f"Patch mod written to:\n{patch_root}"
       if add_to_coll:
-         msg += "\\n\\nRemember to add it at the END of your collection."
+         msg += "\n\nThe patch mod will be added at the end of the current collection."
+      else:
+         msg += "\n\nRemember to add it at the END of your collection."
       QMessageBox.information(self, "Patch mod created", msg)
-      self.patch_created.emit(folder)
+      self.patch_created.emit(folder, add_to_coll)
       self.accept()
 
 
@@ -205,8 +228,7 @@ class _SummaryPage(QWidget):
          )
       else:
          text = (
-            f"Found <b>{total}</b> conflicting definition(s) across "
-            f"{total} file(s).\\n\\n"
+            f"Found <b>{total}</b> conflicting definition(s).\n\n"
             f"✔ <b>{auto_n}</b> can be resolved automatically "
             f"(last-mod-wins or additive merge).\\n"
          )
@@ -301,9 +323,11 @@ class _TaskDetailPanel(QWidget):
 
    def load_task(self, task: ResolutionTask) -> None:
       self._task = task
+      mods = ", ".join(task.mod_names)
       self._header.setText(
          f"<b>{task.def_key}</b><br>"
-         f"<small>{task.rel_path}</small>"
+         f"<small>{task.rel_path}</small><br>"
+         f"<small>Mods: {mods}</small>"
       )
 
       # Clear old radio buttons

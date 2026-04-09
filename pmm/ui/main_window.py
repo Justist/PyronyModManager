@@ -99,6 +99,9 @@ class MainWindow(QMainWindow):
       if getattr(self._prefs, "font_size", 0):
          self._mod_list_widget.set_font_size(self._prefs.font_size)
       self._conflict_view = ConflictView()
+      self._conflict_view.patch_created.connect(self._on_patch_created)
+      # Let the Conflicts tab pull fresh playset mods right before scanning.
+      self._conflict_view.set_mods_provider(self._current_playset_mods)
       self._tabs.addTab(self._mod_list_widget, "Load Order")
       self._tabs.addTab(self._conflict_view, "Conflicts")
 
@@ -679,6 +682,42 @@ class MainWindow(QMainWindow):
             "Examples: " + ", ".join(parts) + extra
       )
       self._conflict_view.set_dependency_warning(msg)
+
+   def _current_playset_mods(self) -> list[Mod]:
+      """Return mods in the active collection, in load-order, for conflict scans."""
+      coll = self._active_collection()
+      return services.resolve_load_order(self._all_mods, coll) if coll else []
+
+   def _on_patch_created(self, folder: str, add_to_collection: bool) -> None:
+      """
+      When a patch mod is created, optionally add it to the current collection
+      at the end of the load order.
+      """
+      if not add_to_collection:
+         return
+      coll = self._active_collection()
+      if not coll:
+         return
+
+      # Now that the patch exists on disk, refresh mods to pick it up.
+      self._refresh_game()
+
+      # Find the patch mod by folder name (descriptor stem).
+      patch_id = folder  # Mod.id for local mods = descriptor stem
+      if patch_id not in {m.id for m in self._all_mods}:
+         self.statusBar().showMessage(
+             f"Patch mod '{patch_id}' was created but could not be found in the mod list.",
+             6000,
+         )
+         return
+
+      if patch_id not in coll.mods:
+         coll.mods.append(patch_id)
+         storage.save(self._prefs, "prefs.json")
+         # Refresh UI to show it at the end.
+         self._repopulate_coll_box(select=coll.name)
+         self.statusBar().showMessage(
+             f"Patch mod '{patch_id}' added at the end of '{coll.name}'.", 8000)
 
    def _refresh_coll_buttons(self) -> None:
       has_coll = self._active_collection() is not None

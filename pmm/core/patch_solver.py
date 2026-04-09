@@ -280,6 +280,14 @@ def _plan_for_file(
       if len(unique_texts) == 1:
          continue
 
+      # If only the last version differs and all earlier ones are identical,
+      # we can safely treat it as "last-mod-wins" without bothering the user.
+      if len(unique_texts) == 2:
+         first_text = versions[0].text
+         if all(v.text == first_text for v in versions[:-1]):
+            # Let auto_strategy PICK_LAST handle it; no manual task needed.
+            continue
+
       # Determine strategy.
       strategy = _suggest_strategy(def_key, versions)
 
@@ -365,7 +373,7 @@ def write_patch_mod(
 
    Raises FileExistsError if the directory already exists and overwrite=False.
    """
-   folder = _safe_folder_name(patch_name)
+   folder = safe_folder_name(patch_name)
    patch_root = game_user_data / "mod" / folder
 
    if patch_root.exists() and not overwrite:
@@ -421,7 +429,7 @@ def _pick_source(task: ResolutionTask) -> str:
    )
 
 
-def _safe_folder_name(name: str) -> str:
+def safe_folder_name(name: str) -> str:
    """Convert a human-readable patch name to a safe directory name."""
    import re
    return re.sub(r"[^\\w-]+", "_", name).strip("_").lower() or "patch"
