@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLa
 
 from pmm.core.models import Mod
 from pmm.core.services import FileConflict
+from pmm.ui.error_util import show_error, show_warning
 
 
 class PatchDialog(QDialog):
@@ -163,21 +164,16 @@ class PatchDialog(QDialog):
       self._page_review.flush_manual_choices()
 
       patch_name = self._page_finish.patch_name()
-      if not patch_name.strip():
-         QMessageBox.warning(self, "Name required", "Please enter a patch mod name.")
-         return
+      from shutil import rmtree
 
-      patch_root = self._game_user_data / "mod" / safe_folder_name(patch_name)
+      # Compute folder and remove any previous patch completely.
+      folder = safe_folder_name(patch_name)
+      patch_root = self._game_user_data / "mod" / folder
       if patch_root.exists():
-         reply = QMessageBox.question(
-            self,
-            "Patch mod exists",
-            f"A patch mod folder already exists:\n  {patch_root}\n\n"
-            "Overwrite it?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-         )
-         if reply != QMessageBox.StandardButton.Yes:
+         try:
+            rmtree(patch_root)
+         except Exception as exc:
+            show_error(self, "Remove old patch mod failed", exc)
             return
 
       try:
@@ -188,18 +184,16 @@ class PatchDialog(QDialog):
             overwrite=True,
          )
       except Exception as exc:
-         QMessageBox.critical(self, "Write failed", str(exc))
+         show_error(self, "Write failed", exc)
          return
 
       folder = patch_root.name
-      add_to_coll = self._page_finish.add_to_collection()
-      msg = f"Patch mod written to:\n{patch_root}"
-      if add_to_coll:
-         msg += "\n\nThe patch mod will be added at the end of the current collection."
-      else:
-         msg += "\n\nRemember to add it at the END of your collection."
+      msg = f"""Patch mod written to:
+{patch_root}
+
+The patch mod will be added at the end of the current collection."""
       QMessageBox.information(self, "Patch mod created", msg)
-      self.patch_created.emit(folder, add_to_coll)
+      self.patch_created.emit(folder, True)
       self.accept()
 
 
@@ -436,31 +430,32 @@ class _FinishPage(QWidget):
          self, collection_name: str = "", parent: QWidget | None = None
    ) -> None:
       super().__init__(parent)
+      from pmm.core.patch_solver import patch_name_for_collection
 
-      default_name = "Pyrony Patch"
-      if collection_name:
-         default_name += f" — {collection_name}"
+      self._collection_name = collection_name
+      self._patch_name = patch_name_for_collection(collection_name or "playset")
 
-      self._name_edit = QLineEdit(default_name)
       self._add_check = QCheckBox(
-         "Remind me to add this patch mod to the collection"
+         "Add this patch mod to the collection automatically"
       )
       self._add_check.setChecked(True)
 
       layout = QVBoxLayout(self)
       layout.addWidget(QLabel("<b>Finalise Patch Mod</b>"))
-      layout.addWidget(QLabel("Patch mod name:"))
-      layout.addWidget(self._name_edit)
+      layout.addWidget(
+         QLabel(
+            f"Patch mod name (fixed): <b>{self._patch_name}</b><br>"
+            "<small>The patch mod will be written to your game's mod directory and "
+            "must be placed <b>last</b> in the collection.</small>"
+         )
+      )
       layout.addSpacing(12)
       layout.addWidget(self._add_check)
       layout.addStretch()
-      layout.addWidget(QLabel(
-         "<small>The patch mod will be written to your game's mod directory.\\n"
-         "It must be placed <b>last</b> in your collection's load order.</small>"
-      ))
 
    def patch_name(self) -> str:
-      return self._name_edit.text().strip()
+      return self._patch_name
 
    def add_to_collection(self) -> bool:
-      return self._add_check.isChecked()
+      # Behaviour is now always "add", this is kept for signal signature compat.
+      return True

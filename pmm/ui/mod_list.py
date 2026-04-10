@@ -113,10 +113,12 @@ class ModListWidget(QWidget):
    """
 
    order_changed: Signal = Signal(list)
+   # Emitted when the user chooses "Set dependencies…" on a mod.
+   request_edit_dependencies: Signal = Signal(Mod)
 
    def __init__(self, parent: QWidget | None = None) -> None:
       super().__init__(parent)
-      self._mods: dict[str, Mod] = {}
+      self._mods: Dict[str, Mod] = {}
       self._loading: bool = False
       self._collection_active: bool = False
 
@@ -623,13 +625,17 @@ class ModListWidget(QWidget):
          return
 
       menu = QMenu(self)
+      set_deps = menu.addAction("Set dependencies…")
+      menu.addSeparator()
       open_folder = menu.addAction("Open in File Explorer")
       open_workshop = menu.addAction("Open in Steam Workshop")
       if not mod.remote_id:
          open_workshop.setEnabled(False)
 
       action = menu.exec(tree.viewport().mapToGlobal(pos))
-      if action is open_folder:
+      if action is set_deps:
+         self.request_edit_dependencies.emit(mod)
+      elif action is open_folder:
          self._open_mod_folder(mod)
       elif action is open_workshop and mod.remote_id:
          self._open_mod_workshop(mod)

@@ -63,6 +63,7 @@ from typing import Dict, List, Optional, Tuple
 from pmm.core.clausewitz import (
    CWBlock, CWPair, parse_file, unparse, unparse_pair,
 )
+from pmm.core.cw_merge_utils import merge_block_items_union
 from pmm.core.models import Mod
 from pmm.core.services import (_CW_TEXT_EXTS, ConflictSeverity, FileConflict)
 
@@ -173,39 +174,13 @@ def _merge_additive(versions: List[DefinitionVersion]) -> str:
    Items are emitted in the order they first appear, across versions in
    load order.
    """
-   seen: set[str] = set()
-   merged_items: list = []
+   blocks: List[CWBlock] = []
+   blocks.extend(v.pair.value for v in versions
+                 if isinstance(v.pair.value, CWBlock))
+   if not blocks:
+      return versions[-1].text  # fallback to last version string
 
-   for v in versions:
-      val = v.pair.value
-      if not isinstance(val, CWBlock):
-         # scalar — just keep the last value
-         continue
-      for item in val.items:
-         # - CWBlock stays as-is
-         # - CWRaw is already a str subclass
-         # - CWPair needs unparse_pair
-         if isinstance(item, CWBlock):
-            value_for_unparse = item
-         elif isinstance(item, CWPair):
-            item_text = unparse_pair(item)
-            if item_text not in seen:
-               seen.add(item_text)
-               merged_items.append(item)
-            continue
-         else:
-            # CWRaw or plain str
-            value_for_unparse = str(item)
-
-         item_text = unparse(value_for_unparse)
-         if item_text not in seen:
-            seen.add(item_text)
-            merged_items.append(item)
-
-   if not merged_items:
-      return versions[-1].text  # fallback
-
-   merged_block = CWBlock(items=merged_items)
+   merged_block, _ = merge_block_items_union(blocks)
    pair = versions[-1].pair
    return f"{pair.key} {pair.op} {unparse(merged_block)}"
 
@@ -432,7 +407,16 @@ def _pick_source(task: ResolutionTask) -> str:
 def safe_folder_name(name: str) -> str:
    """Convert a human-readable patch name to a safe directory name."""
    import re
-   return re.sub(r"[^\\w-]+", "_", name).strip("_").lower() or "patch"
+   return re.sub(r"[^\w-]+", "_", name).strip("_").lower() or "patch"
+
+
+def patch_name_for_collection(coll_name: str) -> str:
+   """
+   Return the canonical patch mod name for a collection:
+   "Pyrony_<playset_name>_patch", with spaces replaced by underscores.
+   """
+   base = coll_name.replace(" ", "_")
+   return f"Pyrony_{base}_patch"
 
 
 # ── External editor integration ───────────────────────────────────────────────

@@ -75,6 +75,8 @@ class SettingsDialog(QDialog):
 
       self._update_check = QCheckBox("Check for updates on startup")
       self._update_check.setChecked(self._prefs.check_for_updates)
+      self._semantic_patch = QCheckBox("Use semantic merge when creating patch mods (advanced)")
+      self._semantic_patch.setChecked(getattr(self._prefs, "use_semantic_patch", False))
 
       # Font size setting
       font_row = QWidget()
@@ -96,6 +98,7 @@ class SettingsDialog(QDialog):
 
       layout.addWidget(self._update_check)
       layout.addWidget(font_row)
+      layout.addWidget(self._semantic_patch)
       layout.addWidget(dep_btn)
       return group
 
@@ -134,4 +137,5 @@ class SettingsDialog(QDialog):
       }
       self._prefs.check_for_updates = self._update_check.isChecked()
       self._prefs.font_size = int(self._font_spin.value())
+      self._prefs.use_semantic_patch = self._semantic_patch.isChecked()
       self.accept()

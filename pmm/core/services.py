@@ -59,6 +59,7 @@ _BINARY_EXTS = frozenset({
    ".wav", ".ogg", ".mp3", ".wem",
    ".mesh", ".anim", ".asset",
    ".py", ".dll", ".exe", ".bin", ".dat", ".zip", ".7z", ".rar",
+   ".md", ".pdf", ".docx", ".xlsx", ".pptx",
 })
 
 # Files with these extensions are Clausewitz text and can be deep-diffed.
@@ -69,9 +70,8 @@ _CW_TEXT_EXTS = frozenset({
 
 # All text extensions we may encounter (CW + data formats).
 _ALL_TEXT_EXTS = _CW_TEXT_EXTS | frozenset({
-   ".csv", ".yml", ".yaml", ".json", ".lua", ".shader", ".fxh",
+   ".csv", ".yml", ".yaml", ".json", ".lua", ".shader", ".fxh"
 })
-
 
 # Cache for parse_text(...).definition_names() used by conflict scans.
 # Keyed by absolute file path + stat tuple so edits invalidate naturally.
@@ -137,7 +137,8 @@ def _collect_file_owners(mods: List[Mod]) -> Dict[str, List[Mod]]:
    Skipped:
      • dot-directories (.git, .idea, …)
      • descriptor.mod / changelog.txt at the root
-     • binary / image files
+     • any .txt file in the topmost folder (root of the mod)
+     • binary / image / non-relevant files
    """
    file_owners: Dict[str, List[Mod]] = defaultdict(list)
    for mod in mods:
@@ -146,14 +147,27 @@ def _collect_file_owners(mods: List[Mod]) -> Dict[str, List[Mod]]:
          continue
       for f in root.rglob("*"):
          rel = f.relative_to(root)
+         # Skip hidden directories/files
          if any(part.startswith(".") for part in rel.parts):
             continue
          if not f.is_file():
             continue
-         if str(rel).lower() in {"descriptor.mod", "changelog.txt"}:
+
+         rel_str = str(rel).lower()
+
+         # Skip special root-level files
+         if rel_str in {"descriptor.mod", "changelog.txt"}:
             continue
+
+         # Skip any .txt file in the topmost folder of the mod
+         # i.e. relative path has exactly one part and ends with ".txt"
+         if len(rel.parts) == 1 and f.suffix.lower() == ".txt":
+            continue
+
+         # Skip binaries
          if f.suffix.lower() in _BINARY_EXTS:
             continue
+
          file_owners[str(rel)].append(mod)
    return file_owners
 
@@ -219,12 +233,13 @@ def _owners_form_dependency_chain(owners: List[Mod]) -> bool:
    # For every unordered pair (A,B), require A→B or B→A
    ids = [m.id for m in owners]
    for i, a in enumerate(ids):
-      for b in ids[i + 1 :]:
+      for b in ids[i + 1:]:
          deps_a = depends_on.get(a, set())
          deps_b = depends_on.get(b, set())
          if b not in deps_a and a not in deps_b:
             return False
    return True
+
 
 def _strip_comment_only_lines(text: str) -> str:
    """
@@ -241,7 +256,9 @@ def _strip_comment_only_lines(text: str) -> str:
       kept.append(line)
    return "\n".join(kept)
 
-def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[ConflictSeverity | None, List[str]]:
+
+def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[
+   ConflictSeverity | None, List[str]]:
    """
    Determine whether a multi-mod file overlap is a HARD or SOFT conflict.
 

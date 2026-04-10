@@ -109,12 +109,16 @@ def _sorted_owners_by_dependency(owners: list[Mod]) -> list[Mod]:
 class ConflictView(QWidget):
    # payload: (patch_folder_name, add_to_collection)
    patch_created = Signal(str, bool)
+   # Emitted when the user clicks "Create patch mod".
+   request_patch = Signal()
 
    def __init__(self, parent: QWidget | None = None) -> None:
       super().__init__(parent)
       self._game_user_data: Path | None = None
       # Optional callback that returns the current mods in the active playset.
       self._mods_provider: Callable | None = None
+      # Whether to run semantic patching first.
+      self._use_semantic_patch: bool = False
 
       # ── toolbar ──────────────────────────────────────────────────────────
       self._scan_btn = QPushButton("🔄 Scan for conflicts")
@@ -197,7 +201,7 @@ class ConflictView(QWidget):
       root_layout.addWidget(splitter)
 
       self._mods: list[Mod] = []
-      self._conflicts: dict[str, FileConflict] = {}
+      self.conflicts: dict[str, FileConflict] = {}
       self._worker: ConflictScanWorker | None = None
 
    # ── public ────────────────────────────────────────────────────────────────
@@ -205,7 +209,7 @@ class ConflictView(QWidget):
    def set_mods(self, mods: list[Mod]) -> None:
       self._mods = mods
       self._patch_btn.setEnabled(False)
-      self._conflicts = {}
+      self.conflicts = {}
       self._tree.clear()
       self._summary.setText("")
       self._dep_warning.setText("")
@@ -217,6 +221,10 @@ class ConflictView(QWidget):
       mods in the Load Order tab is always reflected.
       """
       self._mods_provider = provider
+
+   def set_use_semantic_patch(self, value: bool) -> None:
+      """Enable or disable semantic-first patch creation."""
+      self._use_semantic_patch = value
 
    def set_dependency_warning(self, text: str) -> None:
       """Show or clear a dependency-order warning."""
@@ -243,7 +251,7 @@ class ConflictView(QWidget):
 
       self._tree.clear()
       self._clear_diff_panel()
-      self._conflicts = {}
+      self.conflicts = {}
       self._summary.setText("")
       self._dep_warning.setText("")
       self._filter.clear()
@@ -275,7 +283,7 @@ class ConflictView(QWidget):
       self._progress.hide()
       self._scan_btn.setEnabled(True)
       self._status.setText("")
-      self._conflicts = result
+      self.conflicts = result
       self._populate_tree(result)
       has_hard = any(
          fc.severity == ConflictSeverity.HARD for fc in result.values()
@@ -288,13 +296,8 @@ class ConflictView(QWidget):
       self._status.setText(f"⚠ Scan failed: {msg}")
 
    def _on_patch(self) -> None:
-      if self._game_user_data is None:
-         # Defensive: should be set by MainWindow when a game is active.
-         self._status.setText("⚠ Set a valid game user-data path before creating a patch.")
-         return
-      dlg = PatchDialog(self._conflicts, self._mods, self._game_user_data, parent=self)
-      dlg.patch_created.connect(self.patch_created)
-      dlg.exec()
+      """User requested a patch mod; delegate to MainWindow."""
+      self.request_patch.emit()
 
    # ── tree population ───────────────────────────────────────────────────────
 
@@ -375,7 +378,7 @@ class ConflictView(QWidget):
 
 
       elif isinstance(data, _ModNodeData) and data.kind == "mod":
-         fc = self._conflicts.get(data.rel_path)
+         fc = self.conflicts.get(data.rel_path)
          owners = _sorted_owners_by_dependency(fc.owners) if fc else []
          if others := [m for m in owners if m is not data.mod]:
             # Show the first dependency-sorted neighbour vs the selected mod.

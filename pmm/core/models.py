@@ -48,6 +48,11 @@ class Preferences:
    theme: str = "dark"
    # Base UI font size in points; applied to the mod list entries.
    font_size: int = 10
+   # When true, patch mod creation will run the semantic merge engine
+   # first and then fall back to manual conflict resolution for anything
+   # unresolved. When false, patch mod creation will skip the semantic merge and
+   # treat all file conflicts as manual.
+   use_semantic_patch: bool = False
    collections: List[ModCollection] = field(default_factory=list)
    # Per-game user-data path overrides set by the Settings dialog.
    # Keys are Game.id; values are absolute path strings.

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 import pmm.core.games as games
 import pmm.core.parser as parser
 from pmm.core.models import Mod, Preferences
+from pmm.ui.error_util import show_warning
 
 
 def _name_matches_query(name: str, query: str) -> bool:
@@ -57,13 +58,20 @@ class DependenciesDialog(QDialog):
    apply to all playsets for that game.
    """
 
-   def __init__(self, prefs: Preferences, game_id: str, parent: QWidget | None = None) -> None:
+   def __init__(
+         self,
+         prefs: Preferences,
+         game_id: str,
+         parent: QWidget | None = None,
+         initial_mod_id: str = "",
+   ) -> None:
       super().__init__(parent)
       self.setWindowTitle("Edit mod dependencies")
       self.resize(620, 400)
 
       self._prefs = prefs
       self._game_id = game_id
+      self._initial_mod_id = initial_mod_id
       self._mods: List[Mod] = []
       self._mods_by_id: Dict[str, Mod] = {}
       self._deps: Dict[str, List[str]] = {
@@ -132,11 +140,11 @@ class DependenciesDialog(QDialog):
    def _load_mods(self) -> None:
       game = games.get_game(self._game_id)
       if not game:
-         QMessageBox.warning(self, "No game", "Selected game no longer exists.")
+         show_warning(self, "No game", "Selected game no longer exists.")
          return
       mod_dir = games.get_mod_dir(game, self._prefs.game_paths)
       if not mod_dir or not mod_dir.exists():
-         QMessageBox.warning(
+         show_warning(
             self,
             "Mod directory not found",
             f"Mod directory for {game.display_name} not found:\n{mod_dir}\n\n"
@@ -157,11 +165,18 @@ class DependenciesDialog(QDialog):
 
    def _populate_mod_list(self) -> None:
       self._mod_list.clear()
-      for mod in sorted(self._mods, key=lambda m: m.name.lower()):
+      sorted_mods = sorted(self._mods, key=lambda m: m.name.lower())
+      id_to_row: Dict[str, int] = {}
+      for row, mod in enumerate(sorted_mods):
          item = QListWidgetItem(mod.name)
          item.setData(Qt.ItemDataRole.UserRole, mod.id)
          self._mod_list.addItem(item)
-      if self._mod_list.count() > 0:
+         id_to_row[mod.id] = row
+
+      # Pre-select the requested mod if provided; otherwise first row.
+      if self._initial_mod_id and self._initial_mod_id in id_to_row:
+         self._mod_list.setCurrentRow(id_to_row[self._initial_mod_id])
+      elif self._mod_list.count() > 0:
          self._mod_list.setCurrentRow(0)
 
    def _filter_mod_list(self, text: str) -> None:
