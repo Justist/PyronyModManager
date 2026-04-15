@@ -669,7 +669,6 @@ class MainWindow(QMainWindow):
 
       # Merge user-defined dependencies for this game into Mod.dependencies.
       user_deps_for_game = self._prefs.user_dependencies.get(game.id, {})
-      by_id = {m.id: m for m in self._all_mods}
       for mod in self._all_mods:
          if extra := user_deps_for_game.get(mod.id, []):
             # Keep dependencies unique and preserve existing descriptor ones.
@@ -889,9 +888,13 @@ class MainWindow(QMainWindow):
             f"Patch mod written to:\n  {result.mod_dir}\n"
             f"{result.files_written} files written.",
          )
-         # Refresh to pick up semantic patch and reduce remaining conflicts.
-         self._refresh_game()
-         # Optionally, re-scan and then open manual PatchDialog if there are still HARD conflicts.
+         # Reuse the same flow as manual PatchDialog:
+         #   • treat folder name as new mod id
+         #   • add it to the current collection
+         #   • set dependencies on all other mods in the playset.
+         folder_name = result.mod_dir.name
+         self._on_patch_created(folder_name, True)
+         # After adding the patch, re-scan conflicts to show what's left.
          self._conflict_view._scan_btn.click()
 
       worker.finished.connect(_on_semantic_done)
@@ -900,8 +903,8 @@ class MainWindow(QMainWindow):
 
    def _on_patch_created(self, folder: str, add_to_collection: bool) -> None:
       """
-      When a patch mod is created, add it to the current collection
-      at the end of the load order.
+      When a patch mod is created, ensure it is part of the current collection
+      and depends on all other mods in that playset.
       """
       coll = self._active_collection()
       if not coll:
@@ -912,20 +915,33 @@ class MainWindow(QMainWindow):
 
       # Find the patch mod by folder name (descriptor stem).
       patch_id = folder  # Mod.id for local mods = descriptor stem
-      if patch_id not in {m.id for m in self._all_mods}:
+      mods_by_id = {m.id: m for m in self._all_mods}
+      patch_mod = mods_by_id.get(patch_id)
+      if patch_mod is None:
          self.statusBar().showMessage(
             f"Patch mod '{patch_id}' was created but could not be found in the mod list.",
             6000,
          )
          return
 
+      # Ensure the patch mod is in the current collection, at the end.
       if patch_id not in coll.mods:
          coll.mods.append(patch_id)
-         storage.save(self._prefs, "prefs.json")
-         # Refresh UI to show it at the end.
-         self._repopulate_coll_box(select=coll.name)
-         self.statusBar().showMessage(
-            f"Patch mod '{patch_id}' added at the end of '{coll.name}'.", 8000)
+
+      # Make the patch mod depend on all other mods currently in the playset.
+      # This uses mod IDs; elsewhere they are resolved against installed mods.
+      other_ids = [mid for mid in coll.mods if mid != patch_id]
+      patch_mod.dependencies = list(other_ids)
+
+      # Persist both the collection change and the effective dependencies.
+      storage.save(self._prefs, "prefs.json")
+
+      # Refresh UI to show it at the end and update conflict/dependency views.
+      self._repopulate_coll_box(select=coll.name)
+      self.statusBar().showMessage(
+         f"Patch mod '{patch_id}' added to '{coll.name}' with dependencies "
+         f"on all other mods in the playset.", 8000
+      )
 
    def _refresh_coll_buttons(self) -> None:
       has_coll = self._active_collection() is not None

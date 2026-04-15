@@ -13,8 +13,8 @@ import contextlib
 import shutil
 from dataclasses import dataclass, field
 from enum import auto, Enum
-from pathlib import Path
-from typing import Dict, List, Tuple
+from pathlib import Path, PurePosixPath
+from typing import Dict, List, Set, Tuple
 
 from pmm.core.clausewitz import (
    CWBlock, CWPair, CWRaw,
@@ -23,6 +23,67 @@ from pmm.core.clausewitz import (
 from pmm.core.cw_merge_utils import merge_block_items_union
 from pmm.core.models import Mod
 from pmm.core.services import _CW_TEXT_EXTS, ConflictSeverity, FileConflict
+
+
+_GAME_READ_ROOT_DIRS = frozenset({
+   "common",
+   "events",
+   "gfx",
+   "gui",
+   "interface",
+   "localisation",
+   "map",
+   "music",
+   "sound",
+   "history",
+   "decisions",
+   "missions",
+   "prescripted_countries",
+   "prescripted_species_systems",
+   "flags",
+   "portraits",
+   "fonts",
+   "tutorial",
+   "ambient_objects",
+   "masks",
+   "video",
+   "assets",
+})
+
+_IGNORED_DIR_NAMES = frozenset({
+   "old",
+   "backup",
+   "backups",
+   "tmp",
+   "temp",
+   "cache",
+   "__pycache__",
+   "build",
+})
+
+
+def _is_merge_source_file(mod_root: Path, file_path: Path) -> bool:
+   """Return True if a file should be consumed by unified-mod generation."""
+   if not file_path.is_file():
+      return False
+
+   rel = file_path.relative_to(mod_root)
+   parts = [p.lower() for p in rel.parts]
+   if not parts:
+      return False
+
+   # Skip hidden and non-game utility folders/files.
+   if any(part.startswith(".") for part in parts):
+      return False
+   if any(part in _IGNORED_DIR_NAMES for part in parts[:-1]):
+      return False
+
+   # A merged mod gets its own generated descriptors; do not copy .mod files.
+   if rel.suffix.lower() == ".mod":
+      return False
+
+   # Only include known top-level game data folders.
+   return parts[0] in _GAME_READ_ROOT_DIRS
 
 
 # ── merge strategy per value type ────────────────────────────────────────────
@@ -36,51 +97,100 @@ class MergeStrategy(Enum):
    MANUAL = auto()  # tool cannot decide; emit a conflict comment
 
 
-# Field names whose values should be ADDED across mods
-_ADDITIVE_FIELDS = frozenset({
-   # Stellaris modifiers
-   "pop_growth_speed", "ship_fire_rate_mult", "country_resource_max_add",
-   "planet_building_cost_mult", "ship_hull_mult", "army_damage_mult",
-   # HOI4 modifiers
-   "production_speed_buildings_factor", "research_time_factor",
-   "stability_factor", "war_support_factor",
-   # EU4 modifiers
-   "global_tax_modifier", "global_manpower_modifier", "stability_cost_modifier",
-   # CK3
-   "monthly_prestige", "monthly_piety", "fertility",
-   # Generic
-   "add", "factor",
-})
+# ── Path-prefix → field-name → strategy ──────────────────────────────────────
+#
+# Entries are tested in order; the FIRST matching prefix wins.
+# Each entry: (path_prefix_lower, {field: MergeStrategy}, default_for_numerics)
+#
+# The empty-string entry at the end is the unconditional fallback.
+#
+_PATH_FIELD_TABLE: list[
+   tuple[str, dict[str, MergeStrategy], MergeStrategy]
+] = [
+   # ── Events / decisions / on_actions ──────────────────────────────────
+   # These are scripted state machines.  Never merge field-by-field.
+   ("events/", {}, MergeStrategy.LAST_WINS),
+   ("common/decisions", {}, MergeStrategy.LAST_WINS),
+   ("common/on_actions", {"on_action": MergeStrategy.LIST_UNION},
+    MergeStrategy.LIST_UNION),
 
-# Field names that should take the maximum
-_MAX_FIELDS = frozenset({
-   "max_speed", "max_range", "max_manpower", "max_firerate",
-   "max_count", "ai_chance",
-})
+   # ── Modifiers (Stellaris / EU4 / CK3) ─────────────────────────────────
+   # Every numeric child is additive; icon/category are presentation only.
+   ("common/modifiers", {"icon": MergeStrategy.LAST_WINS,
+                         "category": MergeStrategy.LAST_WINS},
+    MergeStrategy.NUMERIC_ADD),
+   ("common/static_modifiers", {"icon": MergeStrategy.LAST_WINS},
+    MergeStrategy.NUMERIC_ADD),
+   ("common/opinion_modifiers", {"icon": MergeStrategy.LAST_WINS},
+    MergeStrategy.NUMERIC_ADD),
 
-# Field names that should take the minimum
-_MIN_FIELDS = frozenset({
-   "cost", "build_time", "days_of_supply", "cooldown",
-   "research_cost", "production_cost",
-})
+   # ── Technology ─────────────────────────────────────────────────────────
+   ("common/technology", {"cost": MergeStrategy.NUMERIC_MIN,
+                          "research_cost": MergeStrategy.NUMERIC_MIN,
+                          "time": MergeStrategy.NUMERIC_MIN,
+                          "ai_chance": MergeStrategy.NUMERIC_MAX,
+                          "icon": MergeStrategy.LAST_WINS},
+    MergeStrategy.LAST_WINS),
+   ("technologies/", {"research_cost": MergeStrategy.NUMERIC_MIN,
+                      "path": MergeStrategy.LIST_UNION},
+    MergeStrategy.LAST_WINS),
 
-# Keys whose block children should be union-merged (list-like containers)
-_LIST_BLOCK_KEYS = frozenset({
-   "potential", "trigger", "allow", "on_action",
-   "add_trait", "remove_trait",
-})
+   # ── Buildings ──────────────────────────────────────────────────────────
+   ("common/buildings", {"cost": MergeStrategy.NUMERIC_MIN,
+                         "time": MergeStrategy.NUMERIC_MIN,
+                         "max": MergeStrategy.NUMERIC_MAX,
+                         "modifier": MergeStrategy.NUMERIC_ADD,
+                         "icon": MergeStrategy.LAST_WINS},
+    MergeStrategy.LAST_WINS),
+
+   # ── Traits (CK3 / Stellaris / EU4) ────────────────────────────────────
+   ("common/traits", {"opposites": MergeStrategy.LIST_UNION,
+                      "prerequisites": MergeStrategy.LIST_UNION,
+                      "icon": MergeStrategy.LAST_WINS},
+    MergeStrategy.NUMERIC_ADD),
+
+   # ── National focuses (HOI4) ────────────────────────────────────────────
+   ("common/national_focus", {"cost": MergeStrategy.NUMERIC_MIN,
+                              "prerequisite": MergeStrategy.LIST_UNION,
+                              "mutually_exclusive": MergeStrategy.LIST_UNION,
+                              "icon": MergeStrategy.LAST_WINS},
+    MergeStrategy.LAST_WINS),
+
+   # ── Policies / edicts ──────────────────────────────────────────────────
+   ("common/policies", {"cost": MergeStrategy.NUMERIC_MIN,
+                        "ai_will_do": MergeStrategy.LAST_WINS,
+                        "modifier": MergeStrategy.NUMERIC_ADD},
+    MergeStrategy.LAST_WINS),
+
+   # ── Ethics / factions (Stellaris) ─────────────────────────────────────
+   ("common/ethics", {"ethic_pop_modifier": MergeStrategy.NUMERIC_ADD,
+                      "country_modifier": MergeStrategy.NUMERIC_ADD,
+                      "icon": MergeStrategy.LAST_WINS},
+    MergeStrategy.LAST_WINS),
+
+   # ── Scripted variables / inline @-vars ────────────────────────────────
+   ("common/scripted_variables", {}, MergeStrategy.LAST_WINS),
+
+   # ── Fallback — anything not listed above ──────────────────────────────
+   ("", {}, MergeStrategy.LAST_WINS),
+]
 
 
-def _strategy_for(key: str) -> MergeStrategy:
-   if key in _ADDITIVE_FIELDS:
-      return MergeStrategy.NUMERIC_ADD
-   if key in _MAX_FIELDS:
-      return MergeStrategy.NUMERIC_MAX
-   if key in _MIN_FIELDS:
-      return MergeStrategy.NUMERIC_MIN
-   if key in _LIST_BLOCK_KEYS:
-      return MergeStrategy.LIST_UNION
-   return MergeStrategy.LAST_WINS
+def _strategy_for(key: str, rel_path: str = "") -> MergeStrategy:
+   """
+    Return the MergeStrategy for a field `key` inside a file at `rel_path`.
+
+    Uses a two-level table: path prefix → {field_name: strategy}.
+    Falls back to the path's default_for_numerics when the field is
+    unknown but its value looks numeric; otherwise LAST_WINS.
+    """
+   norm = PurePosixPath(rel_path.replace("\\", "/")).as_posix().lower()
+   return next(
+      (field_map[key] if key in field_map else default_numeric
+       for prefix, field_map, default_numeric in _PATH_FIELD_TABLE
+       if not prefix or norm.startswith(prefix)),
+      MergeStrategy.LAST_WINS,
+   )
 
 
 # ── per-definition merge ───────────────────────────────────────────────────────
@@ -92,12 +202,12 @@ class MergeNote:
    note: str  # human-readable explanation of the decision
 
 
-def _merge_scalar(key: str, values: list[str]) -> Tuple[str, str]:
+def _merge_scalar(key: str, values: List[str], rel_path: str = "") -> Tuple[str, str]:
    """
    Merge a list of scalar string values according to the field's strategy.
    Returns (merged_value, note).
    """
-   strategy = _strategy_for(key)
+   strategy = _strategy_for(key, rel_path)
 
    def _to_float(v: str) -> float | None:
       with contextlib.suppress(ValueError):
@@ -163,11 +273,22 @@ def _merge_pairs(
          if isinstance(item, CWPair):
             all_children.setdefault(item.key, []).append(item)
 
-   merged_items: list = []
-   # First pass: collect raw (non-pair) items from the last mod
-   merged_items.extend(item for item in base.value.items if not isinstance(item, CWPair))
+   merged_items: List = []
+   # Collect raw items (non-pair) from ALL mods, deduplicated by text content.
+   # These are @-variables, blank lines, and raw comments.
+   raw_seen: Set[str] = set()
+   for pair in pairs:  # pairs is in load order: earliest first
+      if not isinstance(pair.value, CWBlock):
+         continue
+      for item in pair.value.items:
+         if isinstance(item, CWPair):
+            continue
+         item_text = unparse(item) if not isinstance(item, str) else item
+         if item_text not in raw_seen:
+            raw_seen.add(item_text)
+            merged_items.append(item)
    # Second pass: merge each field
-   seen: set[str] = set()
+   seen: Set[str] = set()
    for pair in pairs:
       if not isinstance(pair.value, CWBlock):
          continue
@@ -180,7 +301,7 @@ def _merge_pairs(
             seen.add(item.key)
             continue
 
-         strategy = _strategy_for(item.key)
+         strategy = _strategy_for(item.key, rel_path)
          if strategy == MergeStrategy.LAST_WINS:
             merged_items.append(versions[-1])
             notes.append(MergeNote(
@@ -193,7 +314,7 @@ def _merge_pairs(
                MergeStrategy.NUMERIC_MIN,
          ):
             vals = [v.value for v in versions if isinstance(v.value, str)]
-            merged_val, note = _merge_scalar(item.key, vals)
+            merged_val, note = _merge_scalar(item.key, vals, rel_path)
             merged_items.append(
                CWPair(key=item.key, op=versions[0].op, value=merged_val, line=0)
             )
@@ -232,41 +353,47 @@ def _merge_pairs(
 
 def _merge_cw_file(
       rel_path: str,
-      contributing_mods: list[Mod],  # in load order (first = lowest priority)
+      contributing_mods: list[Mod],
       notes: list[MergeNote],
-      hard_only: bool = False,  # patch mode: only emit conflicting defs
+      hard_only: bool = False,
 ) -> str:
-   """
-   Merge one Clausewitz file from multiple mods.
-   Returns the merged file text.
-   """
-   per_mod_defs: list[dict[str, CWPair]] = []
+   per_mod_defs: List[Dict[str, CWPair]] = []
+   per_mod_order: List[List[str]] = []  # ← key insertion order per mod
+
    for mod in contributing_mods:
       path = mod.path / rel_path
       if not path.is_file():
          per_mod_defs.append({})
+         per_mod_order.append([])
          continue
       with contextlib.suppress(Exception):
-         per_mod_defs.append(parse_file(path).definitions())
+         defs = parse_file(path).definitions()
+         per_mod_defs.append(defs)
+         per_mod_order.append(list(defs.keys()))  # preserves file order
          continue
       per_mod_defs.append({})
+      per_mod_order.append([])
 
-   # All definition keys across all mods
-   all_keys: set[str] = set()
-   for d in per_mod_defs:
-      all_keys.update(d.keys())
+   # Stable merge of key orderings: use the last mod's order as the base,
+   # then append keys that only exist in earlier mods (preserves their order too).
+   seen: Set[str] = set()
+   ordered_keys: List[str] = []
+   # Walk last mod first for the primary order, then earlier mods for extras
+   for key_list in reversed(per_mod_order):
+      for k in key_list:
+         if k not in seen:
+            seen.add(k)
+            ordered_keys.append(k)
 
-   lines: list[str] = [f"# Merged by PyronyModManager — {rel_path}\n"]
+   lines: List[str] = [f"# Merged by PyronyModManager — {rel_path}\n"]
 
-   for def_key in sorted(all_keys):
-      versions: list[CWPair] = [
-         d[def_key] for d in per_mod_defs if def_key in d
-      ]
+   for def_key in ordered_keys:  # ← was sorted(all_keys)
+      versions = [d[def_key] for d in per_mod_defs if def_key in d]
       if hard_only and len(versions) < 2:
-         continue  # patch mode: skip defs that only one mod defines
-
+         continue
       merged = _merge_pairs(versions, def_key, rel_path, notes)
       lines.extend((unparse_pair(merged), ""))
+
    return "\n".join(lines)
 
 
@@ -338,7 +465,7 @@ def build_merged_mod(
    """
    Flatten the entire playset into a single standalone mod.
 
-   For every file present in any mod:
+   For every game-relevant file present in any mod:
      • CW text files → definition-level merge
      • Binary / non-CW files → highest-priority (last mod) wins
    """
@@ -348,7 +475,7 @@ def build_merged_mod(
       if not mod.path.is_dir():
          continue
       for f in mod.path.rglob("*"):
-         if not f.is_file():
+         if not _is_merge_source_file(mod.path, f):
             continue
          rel = str(f.relative_to(mod.path))
          all_files.setdefault(rel, []).append(mod)
@@ -389,18 +516,28 @@ def _write_descriptor(mod_root: Path, mod_name: str, kind: str, outer_mod_dir: P
       Paradox (and Pyrony) require a .mod file in the mod directory; the mod's
       own descriptor.mod is used by the launcher.
       """
-   desc_text = (
-      f'name="{mod_name}"\n'
-      f'version="1.0"\n'
-      f'supported_version="*"\n'
-      f'tags={{\n\t"Utilities"\n}}\n'
-      f'# Generated by PyronyModManager ({kind} mode)\n'
-   )
+   inner_desc_text = f"""name="{mod_name}"
+version="1.0"
+supported_version="*"
+tags={{
+\t"Utilities"
+}}
+# Generated by PyronyModManager ({kind} mode)
+"""
+   outer_desc_text = f"""name="{mod_name}"
+version="1.0"
+supported_version="*"
+path="{mod_root.resolve().as_posix()}"
+tags={{
+\t"Utilities"
+}}
+# Generated by PyronyModManager ({kind} mode)
+"""
 
    # Internal descriptor.mod inside the mod folder
-   (mod_root / "descriptor.mod").write_text(desc_text, encoding="utf-8")
+   (mod_root / "descriptor.mod").write_text(inner_desc_text, encoding="utf-8")
 
    # Outer <folder>.mod descriptor in the mod directory
    folder = mod_root.name
    outer = outer_mod_dir / f"{folder}.mod"
-   outer.write_text(desc_text, encoding="utf-8")
+   outer.write_text(outer_desc_text, encoding="utf-8")

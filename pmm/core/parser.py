@@ -1,3 +1,4 @@
+import contextlib
 import re
 from pathlib import Path
 from typing import Any, Dict, List
@@ -46,7 +47,50 @@ def _is_excluded_mod_name(name: str) -> bool:
    return name.strip().lower().startswith(_EXCLUDED_NAME_PREFIXES)
 
 
+def _move_to_trash(descriptor: Path, mod_dir: Path) -> None:
+   """
+   Move a faulty .mod descriptor into a 'trash' folder under mod_dir.
+
+   This is intentionally quiet: failures are ignored so they don't break startup.
+   """
+   with contextlib.suppress(BaseException):
+      trash_dir = mod_dir / "trash"
+      trash_dir.mkdir(parents=True, exist_ok=True)
+      target = trash_dir / descriptor.name
+      # If a file with the same name is already in trash, overwrite it.
+      if target.exists():
+         target.unlink(missing_ok=True)
+      descriptor.replace(target)
+
+
 def discover_mods(mod_dir: Path) -> List[Mod]:
-   """Scan a directory for *.mod descriptor files and return parsed Mods."""
-   mods = [parse_descriptor(p) for p in sorted(mod_dir.glob("*.mod"))]
-   return [m for m in mods if not _is_excluded_mod_name(m.name)]
+   """
+   Scan a directory for *.mod descriptor files and return parsed Mods.
+
+   Extra safety:
+     • If a .mod file's path= folder does not exist, the .mod file is considered
+       faulty and is moved to mod_dir/trash/ (and skipped from the result).
+   """
+   mods: List[Mod] = []
+   for desc in sorted(mod_dir.glob("*.mod")):
+      try:
+         mod = parse_descriptor(desc)
+      except BaseException:
+         # Malformed descriptor: move it out of the way and skip.
+         _move_to_trash(desc, mod_dir)
+         continue
+
+      if _is_excluded_mod_name(mod.name):
+         # Excluded by name: skip but don't treat as faulty, since the user may have intentionally
+         # put an Irony/PMM mod in the mods folder.
+         continue
+
+      # Check whether the folder the .mod points to actually exists.
+      if not mod.path.exists():
+         # Faulty: descriptor pointing to nowhere → move to trash folder.
+         _move_to_trash(desc, mod_dir)
+         continue
+
+      # Valid mod found: add to the list.
+      mods.append(mod)
+   return mods

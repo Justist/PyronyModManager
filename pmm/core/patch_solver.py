@@ -65,6 +65,7 @@ from pmm.core.clausewitz import (
 )
 from pmm.core.cw_merge_utils import merge_block_items_union
 from pmm.core.models import Mod
+from pmm.core.semantic import _strategy_for as _semantic_field_strategy, MergeStrategy
 from pmm.core.services import (_CW_TEXT_EXTS, ConflictSeverity, FileConflict)
 
 
@@ -86,6 +87,61 @@ _ADDITIVE_KEYS = frozenset({
    "namespace",  # event namespace declarations
    "@",  # @-variable blocks
 })
+
+# Map semantic MergeStrategy → solver Strategy
+_SEMANTIC_TO_SOLVER: dict[MergeStrategy, Strategy] = {
+    MergeStrategy.LAST_WINS:   Strategy.PICK_LAST,
+    MergeStrategy.NUMERIC_ADD: Strategy.MERGE_ALL,
+    MergeStrategy.NUMERIC_MAX: Strategy.MERGE_ALL,
+    MergeStrategy.NUMERIC_MIN: Strategy.MERGE_ALL,
+    MergeStrategy.LIST_UNION:  Strategy.MERGE_ALL,
+    MergeStrategy.MANUAL:      Strategy.MANUAL,
+}
+
+
+def _suggest_strategy(
+    def_key: str,
+    versions: list[DefinitionVersion],
+    rel_path: str = "",
+) -> Strategy:
+   """
+    Infer the best resolution strategy for a conflicting definition.
+
+    Steps:
+    1. Explicit additive top-level key → MERGE_ALL (preserves existing behaviour)
+    2. If the definition is a scalar, ask the semantic layer for its field strategy.
+    3. If the definition is a block, inspect what fraction of its fields are
+       additive/min/max.  If ≥50% are non-LAST_WINS, prefer MERGE_ALL so the
+       semantic _merge_pairs path handles it instead of showing a PICK dialog.
+    4. Fall back to PICK_LAST.
+    """
+   outer_key = def_key.split(".")[0].split("@")[0]
+   if outer_key in _ADDITIVE_KEYS:
+       return Strategy.MERGE_ALL
+
+   if not versions:
+       return Strategy.PICK_LAST
+
+   base_pair = versions[-1].pair
+
+   # Scalar top-level definition
+   if not isinstance(base_pair.value, CWBlock):
+       sem = _semantic_field_strategy(outer_key, rel_path)
+       return _SEMANTIC_TO_SOLVER.get(sem, Strategy.PICK_LAST)
+
+   # Block definition — sample the child fields of the last version
+   block: CWBlock = base_pair.value
+   child_pairs = [item for item in block.items if isinstance(item, CWPair)]
+   if not child_pairs:
+       return Strategy.PICK_LAST
+
+   non_last_wins = sum(
+       _semantic_field_strategy(p.key, rel_path) != MergeStrategy.LAST_WINS
+       for p in child_pairs)
+   if non_last_wins / len(child_pairs) >= 0.5:
+       return Strategy.MERGE_ALL
+
+   return Strategy.PICK_LAST
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -264,7 +320,7 @@ def _plan_for_file(
             continue
 
       # Determine strategy.
-      strategy = _suggest_strategy(def_key, versions)
+      strategy = _suggest_strategy(def_key, versions, rel_path)
 
       task = ResolutionTask(
          rel_path=rel_path,
@@ -275,19 +331,6 @@ def _plan_for_file(
       plan.tasks.append(task)
 
    return plan
-
-
-def _suggest_strategy(def_key: str, versions: List[DefinitionVersion]) -> Strategy:
-   # Additive keys can be safely merged.
-   outer_key = def_key.split(".")[0].split("@")[0]
-   if outer_key in _ADDITIVE_KEYS:
-      return Strategy.MERGE_ALL
-
-   # Otherwise default to PICK_LAST (last mod in load order wins),
-   # mirroring vanilla Clausewitz semantics.
-   # The UI can present this as the suggestion while letting the user override.
-   return Strategy.PICK_LAST
-
 
 # ── Auto-resolution pass ──────────────────────────────────────────────────────
 
@@ -318,7 +361,7 @@ _PATCH_DESCRIPTOR_TEMPLATE = """\
 name = "{name}"
 version = "1.0"
 supported_version = "*"
-path = "mod/{folder}"
+path = "{path}"
 tags = {{
     "Mod Manager"
 }}
@@ -385,7 +428,7 @@ def write_patch_mod(
 
    # Write descriptor.mod (inside mod dir).
    descriptor_text = _PATCH_DESCRIPTOR_TEMPLATE.format(
-      name=patch_name, folder=folder
+      name=patch_name, path=patch_root.resolve().as_posix()
    )
    (patch_root / "descriptor.mod").write_text(descriptor_text, encoding="utf-8")
 
@@ -432,7 +475,7 @@ def open_in_editor(path: Path, editor: Optional[str] = None) -> None:
      4. VS Code (`code`) if available on PATH
      5. Platform default (xdg-open / open / notepad)
    """
-   chosen = (
+   chosen: str | None = (
          editor
          or os.environ.get("VISUAL")
          or os.environ.get("EDITOR")
@@ -440,12 +483,23 @@ def open_in_editor(path: Path, editor: Optional[str] = None) -> None:
 
    if not chosen:
       # Try VS Code
-      import shutil
-      if shutil.which("code"):
-         chosen = "code"
+      if sys.platform == "win32":
+         probe = subprocess.run(
+            ["where", "code"], capture_output=True, text=True, check=False
+         )
+         if probe.returncode == 0 and probe.stdout.strip():
+            chosen = "code"
+      else:
+         probe = subprocess.run(
+            ["which", "code"], capture_output=True, text=True, check=False
+         )
+         if probe.returncode == 0 and probe.stdout.strip():
+            code_cmd = probe.stdout.strip().splitlines()[0]
+            chosen = code_cmd
 
    if chosen:
-      subprocess.Popen([chosen, str(path)])
+      cmd = os.fspath(chosen)
+      subprocess.Popen([cmd, str(path)])
       return
 
    # Platform fallback
