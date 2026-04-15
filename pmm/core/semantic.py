@@ -114,6 +114,15 @@ _PATH_FIELD_TABLE: list[
    ("common/on_actions", {"on_action": MergeStrategy.LIST_UNION},
     MergeStrategy.LIST_UNION),
 
+   # ── Scripted triggers / effects (usually additive) ────────────────────
+   ("common/scripted_triggers", {"ai_weight": MergeStrategy.LAST_WINS},
+    MergeStrategy.LIST_UNION),
+   ("common/scripted_effects", {"ai_weight": MergeStrategy.LAST_WINS},
+    MergeStrategy.LIST_UNION),
+
+   # ── Localisation (just last‑wins) ─────────────────────────────────────
+   ("localisation", {}, MergeStrategy.LAST_WINS),
+
    # ── Modifiers (Stellaris / EU4 / CK3) ─────────────────────────────────
    # Every numeric child is additive; icon/category are presentation only.
    ("common/modifiers", {"icon": MergeStrategy.LAST_WINS,
@@ -283,7 +292,7 @@ def _merge_pairs(
       for item in pair.value.items:
          if isinstance(item, CWPair):
             continue
-         item_text = unparse(item) if not isinstance(item, str) else item
+         item_text = item if isinstance(item, str) else unparse(item)
          if item_text not in raw_seen:
             raw_seen.add(item_text)
             merged_items.append(item)

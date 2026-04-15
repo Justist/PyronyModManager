@@ -55,7 +55,7 @@ def apply_load_order_to_launcher(
 
 # Files with these extensions are skipped during file-level conflict scanning.
 _BINARY_EXTS = frozenset({
-   ".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".webp",
+   ".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".webp", ".pdn",
    ".wav", ".ogg", ".mp3", ".wem",
    ".mesh", ".anim", ".asset",
    ".py", ".dll", ".exe", ".bin", ".dat", ".zip", ".7z", ".rar",
@@ -241,20 +241,48 @@ def _owners_form_dependency_chain(owners: List[Mod]) -> bool:
    return True
 
 
-def _strip_comment_only_lines(text: str) -> str:
+def _strip_comments_and_blank(text: str) -> str:
    """
-   Remove lines that are purely comments (any whitespace followed by '#')
-   and blank lines. Used to treat comment-only edits as no-op.
+   Remove comments and blank lines so that comment-only edits are treated
+   as no-op.
+
+   Rules:
+     • Anything after a '#' is ignored, unless the '#' is inside a
+       double-quoted string.
+     • Lines that become empty (only whitespace / removed comment) are
+       dropped.
    """
-   kept: List[str] = []
+   result: List[str] = []
+
    for line in text.splitlines():
-      stripped = line.lstrip()
-      if not stripped:
-         continue
-      if stripped.startswith("#"):
-         continue
-      kept.append(line)
-   return "\n".join(kept)
+      out_chars: List[str] = []
+      in_string = False
+      i = 0
+      while i < len(line):
+         ch = line[i]
+         if ch == '"' and (i == 0 or line[i - 1] != "\\"):
+            in_string = not in_string
+            out_chars.append(ch)
+         elif ch == "#" and not in_string:
+            # Start of comment outside a string → ignore rest of line
+            break
+         else:
+            out_chars.append(ch)
+         i += 1
+
+      code = "".join(out_chars).rstrip()
+      if code.strip():
+         result.append(code)
+
+   return "\n".join(result)
+
+
+def _is_patch_like(mod: Mod) -> bool:
+   """Heuristic: treat mods with 'patch' in name/tag as overlay mods."""
+   name = (mod.name or "").lower()
+   if "patch" in name or "compat" in name or name.startswith("!"):
+      return True
+   return any("patch" in t.lower() or "compat" in t.lower() for t in mod.tags)
 
 
 def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[
@@ -291,7 +319,12 @@ def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[
       # No overlapping definitions at all → at most a SOFT file overlap.
       return ConflictSeverity.SOFT, []
 
-   # If all owners are related by dependencies, treat as SOFT — load order can solve it.
+      # If one of the owners is a patch‑like mod, treat as SOFT — its purpose
+      # is to override, not to be reported as a real conflict.
+   if any(_is_patch_like(m) for m in owners):
+      return ConflictSeverity.SOFT, []
+
+      # If all owners are related by dependencies, treat as SOFT — load order can solve it.
    if _owners_form_dependency_chain(owners):
       return ConflictSeverity.SOFT, []
 
@@ -307,7 +340,7 @@ def _classify_severity(rel_path: str, owners: List[Mod]) -> Tuple[
          raw = path.read_text(encoding="utf-8-sig", errors="replace")
       except OSError:
          continue
-      contents.add(_strip_comment_only_lines(raw))
+      contents.add(_strip_comments_and_blank(raw))
 
    if len(contents) <= 1:
       # Only comment/whitespace differences → ignore entirely.

@@ -882,12 +882,44 @@ class MainWindow(QMainWindow):
       self._semantic_worker = worker
 
       def _on_semantic_done(result: PatchResult) -> None:
-         QMessageBox.information(
-            self,
-            "Semantic patch mod created",
+         # Build a detailed summary of semantic decisions.
+         note_lines: list[str] = []
+         for n in result.notes:
+            note_lines.append(f"{n.rel_path} — {n.def_id}: {n.note}")
+
+         header = (
             f"Patch mod written to:\n  {result.mod_dir}\n"
-            f"{result.files_written} files written.",
+            f"{result.files_written} files written.\n\n"
          )
+         if note_lines:
+            body = "Semantic merge details:\n" + "\n".join(
+               f"  • {line}" for line in note_lines
+            )
+         else:
+            body = "No semantic notes were generated."
+
+         full_text = header + body
+
+         # Show the message in a scrollable dialog so very long texts
+         # don't exceed the screen height.
+         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+
+         dlg_sem = QDialog(self)
+         dlg_sem.setWindowTitle("Semantic patch mod created")
+         dlg_sem.resize(700, 500)
+
+         layout = QVBoxLayout(dlg_sem)
+         edit = QTextEdit()
+         edit.setReadOnly(True)
+         edit.setPlainText(full_text)
+         layout.addWidget(edit)
+
+         ok_btn = QPushButton("OK")
+         ok_btn.clicked.connect(dlg_sem.accept)
+         layout.addWidget(ok_btn)
+
+         dlg_sem.exec()
+
          # Reuse the same flow as manual PatchDialog:
          #   • treat folder name as new mod id
          #   • add it to the current collection

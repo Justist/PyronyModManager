@@ -133,13 +133,13 @@ def _suggest_strategy(
    block: CWBlock = base_pair.value
    child_pairs = [item for item in block.items if isinstance(item, CWPair)]
    if not child_pairs:
-       return Strategy.PICK_LAST
+      return Strategy.PICK_LAST
 
-   non_last_wins = sum(
-       _semantic_field_strategy(p.key, rel_path) != MergeStrategy.LAST_WINS
-       for p in child_pairs)
-   if non_last_wins / len(child_pairs) >= 0.5:
-       return Strategy.MERGE_ALL
+   # If ANY child field has a non‑LAST_WINS strategy, we prefer MERGE_ALL
+   # so the semantic merge handles it instead of a dumb "pick one".
+   for p in child_pairs:
+      if _semantic_field_strategy(p.key, rel_path) != MergeStrategy.LAST_WINS:
+         return Strategy.MERGE_ALL
 
    return Strategy.PICK_LAST
 
