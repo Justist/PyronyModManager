@@ -63,7 +63,7 @@ from typing import Dict, List, Optional, Tuple
 from pmm.core.clausewitz import (
    CWBlock, CWPair, parse_file, unparse, unparse_pair,
 )
-from pmm.core.cw_merge_utils import merge_block_items_union
+from pmm.core.cw_merge_utils import merge_block_items_union, merge_block_pairs_by_key
 from pmm.core.models import Mod
 from pmm.core.semantic import _strategy_for as _semantic_field_strategy, MergeStrategy
 from pmm.core.services import (_CW_TEXT_EXTS, ConflictSeverity, FileConflict)
@@ -90,19 +90,19 @@ _ADDITIVE_KEYS = frozenset({
 
 # Map semantic MergeStrategy → solver Strategy
 _SEMANTIC_TO_SOLVER: dict[MergeStrategy, Strategy] = {
-    MergeStrategy.LAST_WINS:   Strategy.PICK_LAST,
-    MergeStrategy.NUMERIC_ADD: Strategy.MERGE_ALL,
-    MergeStrategy.NUMERIC_MAX: Strategy.MERGE_ALL,
-    MergeStrategy.NUMERIC_MIN: Strategy.MERGE_ALL,
-    MergeStrategy.LIST_UNION:  Strategy.MERGE_ALL,
-    MergeStrategy.MANUAL:      Strategy.MANUAL,
+   MergeStrategy.LAST_WINS: Strategy.PICK_LAST,
+   MergeStrategy.NUMERIC_ADD: Strategy.MERGE_ALL,
+   MergeStrategy.NUMERIC_MAX: Strategy.MERGE_ALL,
+   MergeStrategy.NUMERIC_MIN: Strategy.MERGE_ALL,
+   MergeStrategy.LIST_UNION: Strategy.MERGE_ALL,
+   MergeStrategy.MANUAL: Strategy.MANUAL,
 }
 
 
 def _suggest_strategy(
-    def_key: str,
-    versions: list[DefinitionVersion],
-    rel_path: str = "",
+      def_key: str,
+      versions: list[DefinitionVersion],
+      rel_path: str = "",
 ) -> Strategy:
    """
     Infer the best resolution strategy for a conflicting definition.
@@ -117,17 +117,17 @@ def _suggest_strategy(
     """
    outer_key = def_key.split(".")[0].split("@")[0]
    if outer_key in _ADDITIVE_KEYS:
-       return Strategy.MERGE_ALL
+      return Strategy.MERGE_ALL
 
    if not versions:
-       return Strategy.PICK_LAST
+      return Strategy.PICK_LAST
 
    base_pair = versions[-1].pair
 
    # Scalar top-level definition
    if not isinstance(base_pair.value, CWBlock):
-       sem = _semantic_field_strategy(outer_key, rel_path)
-       return _SEMANTIC_TO_SOLVER.get(sem, Strategy.PICK_LAST)
+      sem = _semantic_field_strategy(outer_key, rel_path)
+      return _SEMANTIC_TO_SOLVER.get(sem, Strategy.PICK_LAST)
 
    # Block definition — sample the child fields of the last version
    block: CWBlock = base_pair.value
@@ -224,19 +224,32 @@ class FilePatchPlan:
 
 def _merge_additive(versions: List[DefinitionVersion]) -> str:
    """
-   Union all inner items from every version of an additive block.
+   Merge all versions of a definition using the appropriate block strategy.
 
-   Duplicate items (same text) are deduplicated.
-   Items are emitted in the order they first appear, across versions in
-   load order.
+   • If the block contains CWPair-keyed items (attribute/modifier block):
+     use key-union/last-wins via merge_block_pairs_by_key so that fields
+     present in an earlier mod but absent from later mods are NOT dropped.
+
+   • If the block contains only bare CWRaw values (list block, e.g. on_actions):
+     use text-deduplication union via merge_block_items_union.
+
+   Falls back to the last version's text if no blocks are available.
    """
-   blocks: List[CWBlock] = []
-   blocks.extend(v.pair.value for v in versions
-                 if isinstance(v.pair.value, CWBlock))
+   blocks: List[CWBlock] = [
+      v.pair.value for v in versions if isinstance(v.pair.value, CWBlock)
+   ]
    if not blocks:
-      return versions[-1].text  # fallback to last version string
+      return versions[-1].text  # scalar fallback
 
-   merged_block, _ = merge_block_items_union(blocks)
+   # Determine whether this is a keyed-pair block or a bare-list block.
+   # Sample the first block: if ANY item is a CWPair, treat as keyed.
+   has_pairs = any(isinstance(item, CWPair) for b in blocks for item in b.items)
+
+   if has_pairs:
+      merged_block, _ = merge_block_pairs_by_key(blocks)
+   else:
+      merged_block, _ = merge_block_items_union(blocks)
+
    pair = versions[-1].pair
    return f"{pair.key} {pair.op} {unparse(merged_block)}"
 
@@ -332,6 +345,7 @@ def _plan_for_file(
 
    return plan
 
+
 # ── Auto-resolution pass ──────────────────────────────────────────────────────
 
 def apply_auto_resolutions(plans: List[FilePatchPlan]) -> Tuple[int, int]:
@@ -361,7 +375,7 @@ _PATCH_DESCRIPTOR_TEMPLATE = """\
 name = "{name}"
 version = "1.0"
 supported_version = "*"
-path = "{path}"
+path = "mod/{folder}"
 tags = {{
     "Mod Manager"
 }}
@@ -424,17 +438,22 @@ def write_patch_mod(
             task.chosen_text,
             "",
          ))
-      out_path.write_text("\n".join(lines), encoding="utf-8")
+      # Always write Unix line endings so Clausewitz parses cleanly on all platforms.
+      out_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
-   # Write descriptor.mod (inside mod dir).
+   # Both the inner descriptor.mod (inside the mod folder) and the outer
+   # <folder>.mod (in the mod/ directory itself) must use the same relative
+   # path= value.  Stellaris does NOT accept absolute paths here.
    descriptor_text = _PATCH_DESCRIPTOR_TEMPLATE.format(
-      name=patch_name, path=patch_root.resolve().as_posix()
+      name=patch_name, folder=folder
    )
-   (patch_root / "descriptor.mod").write_text(descriptor_text, encoding="utf-8")
+   (patch_root / "descriptor.mod").write_text(
+      descriptor_text, encoding="utf-8", newline="\n"
+   )
 
-   # Also write <folder>.mod in the mod directory (what the launcher needs).
+   # The outer .mod file is what the launcher indexes.
    outer_dot_mod = game_user_data / "mod" / f"{folder}.mod"
-   outer_dot_mod.write_text(descriptor_text, encoding="utf-8")
+   outer_dot_mod.write_text(descriptor_text, encoding="utf-8", newline="\n")
 
    return patch_root
 

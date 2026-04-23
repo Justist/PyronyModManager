@@ -236,11 +236,41 @@ class _Parser:
 
 # ── Serialiser  (AST → canonical Clausewitz text) ────────────────────────────
 
+# Strings that must be re-quoted when serialised:
+#   • empty string
+#   • starts with a digit or minus (would be tokenised as NUMBER)
+#   • contains a dot surrounded by digits on both sides (DATE or float)
+#   • contains characters that are OP / structural tokens: = < > ! { } # space
+#   • is a bare Clausewitz boolean/null keyword that was originally quoted
+_NEEDS_QUOTING_RE = re.compile(
+   r"""
+   ^$                       # empty string
+   | ^-?\d                  # starts with digit or minus-digit → NUMBER/float
+   | \d\.\d                 # contains digit.digit → DATE or float
+   | [=<>!{}\#\s]           # structural/operator characters or whitespace
+   """,
+   re.VERBOSE,
+)
+# Reserved Clausewitz keywords that must be quoted when they appear as
+# *string values* (i.e. the parser stored them stripped of their quotes).
+# In practice this only matters when the original file had `key = "yes"`.
+_RESERVED_KEYWORDS = frozenset({"yes", "no", "none"})
+
+
+def _needs_quoting(s: str) -> bool:
+   """Return True if the string must be wrapped in double-quotes when serialised."""
+   return bool(_NEEDS_QUOTING_RE.search(s)) or s in _RESERVED_KEYWORDS
+
+
 def unparse(node: Value, depth: int = 0) -> str:
    """Convert an AST node back to canonical Clausewitz text."""
    if isinstance(node, str):
-      # Covers both plain str and CWRaw
-      return f'"{node}"' if (" " in node or not node) else node
+      # Covers both plain str and CWRaw.
+      # CWRaw values come from bare list items (numbers, dates, idents) and
+      # were never quoted in source — never re-quote them.
+      if isinstance(node, CWRaw):
+         return node  # always bare: numbers, dates, bare idents in lists
+      return f'"{node}"' if _needs_quoting(node) else node
 
    # At this point node must be a CWBlock
    pad = "\t" * depth
@@ -255,7 +285,7 @@ def unparse(node: Value, depth: int = 0) -> str:
          nested = unparse(item, depth)
          lines.extend(f"{pad}\t{line}" for line in nested.splitlines())
       else:
-         # item is CWRaw (a str subclass)
+         # item is CWRaw (a str subclass) — always emit bare
          lines.append(f"{pad}\t{item}")
    lines.append(f"{pad}}}")
    return "\n".join(lines)

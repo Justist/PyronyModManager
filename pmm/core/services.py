@@ -508,7 +508,6 @@ class ConflictScanWorker(QThread):
          if self._cancelled:
             return {}
          self.progress.emit(i, total, "scanning")
-         # Reuse the same filtering logic as detect_file_conflicts
          for rel_path, owners in _collect_file_owners([mod]).items():
             file_owners[rel_path].extend(owners)
 
@@ -526,6 +525,10 @@ class ConflictScanWorker(QThread):
             return {}
          self.progress.emit(j, n, "classifying")
          severity, conflicting_defs = _classify_severity(rel_path, owners)
+         # severity is None when the only differences are comments/whitespace.
+         # Mirroring detect_file_conflicts_ex: skip these entirely.
+         if severity is None:
+            continue
          result[rel_path] = FileConflict(rel_path, owners, severity, conflicting_defs)
 
       self.progress.emit(n, n, "classifying")
