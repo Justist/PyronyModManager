@@ -37,7 +37,8 @@ SQLite schema notes
 Real table names in the launcher DB:  playsets, playsets_mods, mods
   playsets.id           char(36)  — UUID primary key for the playset row
   playsets.loadOrder    varchar   — enum flag; "custom" for manually ordered
-  playsets.createdOn    datetime  — NOT NULL, must be set on INSERT
+  playsets.createdOn    datetime  — stored as Unix epoch milliseconds
+                                    (Paradox launcher format)
 
   mods.id               char(36)  — UUID primary key (NOT the gameRegistryId)
   mods.gameRegistryId   TEXT      — "mod/ugc_XXXX.mod" or "mod/name.mod"
@@ -222,10 +223,17 @@ def _ensure_launcher_db(db_path: Path) -> None:
       conn.close()
 
 
+def _to_unix_epoch_millis(input_dt: datetime) -> int:
+   """Match C# Convert.ToInt64((input - DateTime.UnixEpoch).TotalMilliseconds)."""
+   unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+   dt_utc = input_dt.astimezone(timezone.utc)
+   return int((dt_utc - unix_epoch).total_seconds() * 1000)
+
+
 def _write_launcher_db(
       user_data: Path,
       collection: ModCollection,
-      ordered: list[Mod],
+      ordered: List[Mod],
 ) -> str:
    """
    Upsert the collection as a named, active playset in launcher-v2.sqlite.
@@ -263,13 +271,15 @@ def _write_launcher_db(
 def _upsert_playset(
       conn: sqlite3.Connection,
       collection: ModCollection,
-      ordered: list[Mod],
+      ordered: List[Mod],
 ) -> str:
    """
    Perform the full playset upsert inside an open transaction.
    Returns the playset UUID used.
    """
-   now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+   now_utc = datetime.now(timezone.utc)
+   created_on = _to_unix_epoch_millis(now_utc)
+   updated_on = created_on #now_utc.strftime("%Y-%m-%d %H:%M:%S")
 
    # ── 1. Resolve or create the playset UUID ─────────────────────────────────
    playset_id: str = ""
@@ -301,7 +311,8 @@ def _upsert_playset(
    # ── 3. Upsert the playset row ─────────────────────────────────────────────
    # loadOrder = 'custom' means the user manually controls load order via
    # the position column in playsets_mods (as opposed to 'automatic').
-   # createdOn must be supplied on INSERT (NOT NULL, no default).
+   # createdOn must be supplied on INSERT (NOT NULL, no default)
+   # and Paradox stores it as Unix epoch milliseconds.
    conn.execute(
       """
       INSERT INTO playsets
@@ -313,14 +324,14 @@ def _upsert_playset(
                                     isActive  = 1,
                                     updatedOn = excluded.updatedOn
       """,
-      (playset_id, collection.name, now, now),
+      (playset_id, collection.name, created_on, updated_on),
    )
 
    # ── 4. Upsert each mod into the mods catalogue; collect row UUIDs ─────────
    # playsets_mods.modId references mods.id (a UUID), NOT gameRegistryId.
    # We look up the existing UUID by gameRegistryId so we never create
    # duplicate rows for a mod the launcher already knows about.
-   mod_uuids: list[str] = []
+   mod_uuids: List[str] = []
    mod_uuids.extend(_upsert_mod_row(conn, mod) for mod in ordered)
    # ── 5. Replace playsets_mods rows for this playset ────────────────────────
    # DELETE + re-INSERT is safer than UPSERT because every position value
