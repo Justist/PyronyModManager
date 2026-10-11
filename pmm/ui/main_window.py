@@ -4,10 +4,10 @@ from typing import Tuple, Union
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-   QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
-   QMenu, QMessageBox, QProgressDialog,
-   QPushButton, QStatusBar, QTabWidget, QToolButton,
-   QVBoxLayout, QWidget,
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
+    QMenu, QMessageBox, QProgressDialog,
+    QPushButton, QStatusBar, QTabWidget, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 import pmm.core.games as games
@@ -32,981 +32,982 @@ from pmm.ui.update_banner import UpdateBanner
 
 
 class MainWindow(QMainWindow):
-   def __init__(self) -> None:
-      super().__init__()
-      self.setWindowTitle("Pyrony Mod Manager")
-      self.resize(960, 680)
-
-      self._prefs: Preferences = storage.load_or_default(Preferences, "prefs.json")
-      self._all_mods: list = []
-      self._update_checker: updater.UpdateChecker
-      self._watcher: ModWatcher
-      self._zip_worker: playset_io.ZipExportWorker | playset_io.ZipImportWorker | None = None
-      self._zip_progress_dlg: QProgressDialog | None = None
-
-      # ── top bar ──────────────────────────────────────────────────────────
-      self._game_box = QComboBox()
-      self._coll_box = QComboBox()
-      self._coll_box.setMinimumWidth(180)
-
-      self._btn_new = QPushButton("＋ New")
-      self._btn_rename = QPushButton("✎ Rename")
-      self._btn_delete = QPushButton("🗑 Delete")
-      self._play_btn = QPushButton("▶ Play")
-      self._apply_btn = QPushButton("✔ Apply")
-      self._settings_btn = QPushButton("⚙")
-
-      self._btn_new.setFixedWidth(80)
-      self._btn_rename.setFixedWidth(90)
-      self._btn_delete.setFixedWidth(80)
-      self._play_btn.setFixedWidth(90)
-      self._apply_btn.setFixedWidth(90)
-      self._settings_btn.setFixedWidth(32)
-      self._settings_btn.setToolTip("Settings")
-
-      # ── import / export drop-down ─────────────────────────────────────────
-      self._io_btn = QToolButton()
-      self._io_btn.setText("⇅ I/O")
-      self._io_btn.setToolTip("Import / Export playset")
-      self._io_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-      self._io_btn.setMenu(self._build_io_menu())
-      self._io_btn.setFixedWidth(72)
-
-      for g in games.KNOWN_GAMES:
-         self._game_box.addItem(g.display_name, userData=g.id)
-      if self._prefs.active_game_id:
-         idx = self._game_box.findData(self._prefs.active_game_id)
-         if idx >= 0:
-            self._game_box.setCurrentIndex(idx)
-
-      top = QHBoxLayout()
-      top.addWidget(QLabel("Game:"))
-      top.addWidget(self._game_box)
-      top.addSpacing(12)
-      top.addWidget(QLabel("Collection:"))
-      top.addWidget(self._coll_box)
-      top.addWidget(self._btn_new)
-      top.addWidget(self._btn_rename)
-      top.addWidget(self._btn_delete)
-      top.addWidget(self._io_btn)
-      top.addStretch()
-      top.addWidget(self._apply_btn)
-      top.addSpacing(4)
-      top.addWidget(self._play_btn)
-      top.addSpacing(4)
-      top.addWidget(self._settings_btn)
-
-      # ── update banner (hidden until an update is found) ───────────────────
-      self._update_banner = UpdateBanner()
-
-      # ── tabs ──────────────────────────────────────────────────────────────
-      self._tabs = QTabWidget()
-      self._mod_list_widget = ModListWidget()
-      self._mod_list_widget.request_edit_dependencies.connect(self._on_request_edit_dependencies)
-      if getattr(self._prefs, "font_size", 0):
-         self._mod_list_widget.set_font_size(self._prefs.font_size)
-      self._conflict_view = ConflictView()
-      self._conflict_view.patch_created.connect(self._on_patch_created)
-      self._conflict_view.request_patch.connect(self._on_request_patch)
-      # Let the Conflicts tab pull fresh playset mods right before scanning.
-      self._conflict_view.set_mods_provider(self._current_playset_mods)
-      self._conflict_view.set_use_semantic_patch(
-         getattr(self._prefs, "use_semantic_patch", False)
-      )
-      self._tabs.addTab(self._mod_list_widget, "Load Order")
-      self._tabs.addTab(self._conflict_view, "Conflicts")
-
-      # ── root layout ───────────────────────────────────────────────────────
-      root = QWidget()
-      layout = QVBoxLayout(root)
-      layout.addLayout(top)
-      layout.addWidget(self._update_banner)
-      layout.addWidget(self._tabs)
-      self.setCentralWidget(root)
-      self.setStatusBar(QStatusBar())
-
-      # ── signals ───────────────────────────────────────────────────────────
-      self._game_box.currentIndexChanged.connect(self._on_game_changed)
-      self._coll_box.currentIndexChanged.connect(self._on_collection_changed)
-      self._mod_list_widget.order_changed.connect(self._on_order_changed)
-      self._btn_new.clicked.connect(self._on_new_collection)
-      self._btn_rename.clicked.connect(self._on_rename_collection)
-      self._btn_delete.clicked.connect(self._on_delete_collection)
-      self._apply_btn.clicked.connect(self._on_apply)
-      self._play_btn.clicked.connect(self._on_play)
-      self._settings_btn.clicked.connect(self._on_settings)
-
-      self._refresh_game()
-      QTimer.singleShot(2000, self._start_update_check)
-
-   # ── window lifecycle ──────────────────────────────────────────────────────
-
-   def closeEvent(self, event) -> None:
-      self._stop_watcher()
-      super().closeEvent(event)
-
-   # ── import / export menu ──────────────────────────────────────────────────
-
-   def _build_io_menu(self) -> QMenu:
-      menu = QMenu(self)
-      menu.addAction("📥  Import playset (JSON…)", self._on_import_json)
-      menu.addAction("📤  Export playset (JSON…)", self._on_export_json)
-      menu.addSeparator()
-      menu.addAction("📦  Import playset (ZIP…)", self._on_import_zip)
-      menu.addAction("🗜   Export playset (ZIP…)", self._on_export_zip)
-      menu.addSeparator()
-      menu.addAction("🧬  Flatten playset into merged mod…", self._on_flatten_playset)
-      return menu
-
-   # ── JSON export ───────────────────────────────────────────────────────────
-
-   def _on_export_json(self) -> None:
-      coll = self._active_collection()
-      if not coll:
-         self.statusBar().showMessage("Select a collection to export.", 4000)
-         return
-
-      default = str(Path.home() / playset_io.suggested_json_filename(coll))
-      path, _ = QFileDialog.getSaveFileName(
-         self, "Export Playset JSON", default, "JSON files (*.json)"
-      )
-      if not path:
-         return
-
-      dest = Path(path)
-      try:
-         playset_io.export_launcher_json(coll, self._all_mods, dest)
-      except Exception as exc:
-         show_error(self, "Export error", exc)
-         return
-
-      self.statusBar().showMessage(
-         f'Playset "{coll.name}" exported → {dest.name}', 6000
-      )
-
-   # ── JSON import ───────────────────────────────────────────────────────────
-
-   def _on_import_json(self) -> None:
-      path, _ = QFileDialog.getOpenFileName(
-         self, "Import Playset JSON", str(Path.home()),
-         "JSON files (*.json);;All files (*)"
-      )
-      if not path:
-         return
-
-      src = Path(path)
-      game_id = self._prefs.active_game_id
-      if not game_id:
-         show_warning(
-            self,
-            "No game selected",
-            "Select a game before importing a playset.",
-         )
-         return
-
-      # Reject duplicate names; the user can rename the collection afterwards.
-      existing = self._collection_names_for_game()
-      coll_name = src.stem
-      if coll_name in existing:
-         coll_name = self._unique_name(coll_name, existing)
-
-      try:
-         result = playset_io.import_launcher_json(
-            src, game_id, self._all_mods, collection_name=coll_name
-         )
-      except Exception as exc:
-         show_error(self, "Import error", exc)
-         return
-
-      self._prefs.collections.append(result.collection)
-      storage.save(self._prefs, "prefs.json")
-      self._repopulate_coll_box(select=result.collection.name)
-
-      msg = f'Imported "{result.collection.name}": {result.summary()}'
-      if result.unmatched:
-         detail = ", ".join(result.unmatched[:5])
-         if len(result.unmatched) > 5:
-            detail += f" (+{len(result.unmatched) - 5} more)"
-         QMessageBox.information(
-            self, "Import complete",
-            f"{msg}\n\nNot found locally (may need to subscribe first):\n{detail}",
-         )
-      else:
-         self.statusBar().showMessage(msg, 6000)
-
-   # ── ZIP export ────────────────────────────────────────────────────────────
-
-   def _on_export_zip(self) -> None:
-      coll = self._active_collection()
-      if not coll:
-         self.statusBar().showMessage("Select a collection to export.", 4000)
-         return
-
-      default = str(Path.home() / playset_io.suggested_zip_filename(coll))
-      path, _ = QFileDialog.getSaveFileName(
-         self, "Export Playset ZIP", default, "ZIP archives (*.zip)"
-      )
-      if not path:
-         return
-
-      dest = Path(path)
-      total = len(coll.mods)
-
-      self._init_zip_progress_dialog('Packing "', coll, total,
-                                     "Export Playset")
-      self._zip_worker = playset_io.ZipExportWorker(
-         coll, self._all_mods, dest, parent=self
-      )
-      assert self._zip_worker is not None
-      self._zip_worker.progress.connect(self._on_zip_progress)
-      self._zip_worker.finished.connect(self._on_zip_export_done)
-      self._zip_worker.error.connect(self._on_zip_worker_error)
-      self._zip_worker.start()
-
-   def _on_zip_export_done(self, dest: Path) -> None:
-      self._close_zip_progress()
-      self.statusBar().showMessage(
-         f"Playset exported → {dest.name}  ({dest.stat().st_size // 1024:,} KB)", 8000
-      )
-
-   # ── ZIP import ────────────────────────────────────────────────────────────
-
-   def _on_import_zip(self) -> None:
-      path, _ = QFileDialog.getOpenFileName(
-         self, "Import Playset ZIP", str(Path.home()),
-         "ZIP archives (*.zip);;All files (*)"
-      )
-      if not path:
-         return
-
-      src = Path(path)
-      game_id = self._prefs.active_game_id
-      game = games.get_game(game_id)
-      if not game:
-         show_warning(
-            self,
-            "No game selected",
-            "Select a game before importing a playset.",
-         )
-         return
-
-      # Resolve the mod directory; prefer the effective (override-aware) path.
-      user_data = games.get_effective_user_data(game, self._prefs.game_paths)
-      mod_dir = (user_data / "mod") if user_data else games.get_mod_dir(game)
-      if mod_dir is None:
-         show_warning(
-            self, "No mod directory",
-            f"Could not determine the mod directory for {game.display_name}.\n"
-            "Set it in Settings → Game user-data paths.",
-         )
-         return
-
-      # Ask once about overwrite policy.
-      reply = QMessageBox.question(
-         self,
-         "Import ZIP — existing mods",
-         "What should happen when a mod folder already exists?\n\n"
-         "Yes    — overwrite with the version from the ZIP\n"
-         "No     — keep the installed version (skip that mod)",
-         QMessageBox.StandardButton.Yes
-         | QMessageBox.StandardButton.No
-         | QMessageBox.StandardButton.Cancel,
-         QMessageBox.StandardButton.No,
-      )
-      if reply == QMessageBox.StandardButton.Cancel:
-         return
-      overwrite = reply == QMessageBox.StandardButton.Yes
-
-      # Derive collection name; make it unique.
-      existing = self._collection_names_for_game()
-      coll_name = self._unique_name(src.stem, existing)
-
-      self._init_zip_progress_dialog('Extracting "', src, 0,
-                                     "Import Playset")
-      self._zip_worker = playset_io.ZipImportWorker(
-         src, game_id, mod_dir, overwrite, coll_name, parent=self
-      )
-      assert self._zip_worker is not None
-      self._zip_worker.progress.connect(self._on_zip_progress)
-      self._zip_worker.finished.connect(self._on_zip_import_done)
-      self._zip_worker.error.connect(self._on_zip_worker_error)
-      self._zip_worker.start()
-
-   def _init_zip_progress_dialog(self, arg0, arg1, arg2, arg3):
-      self._zip_progress_dlg = QProgressDialog(f'{arg0}{arg1.name}"…', "", 0,
-                                               arg2, self)
-      assert self._zip_progress_dlg is not None
-      self._zip_progress_dlg.setWindowTitle(arg3)
-      self._zip_progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
-      self._zip_progress_dlg.setMinimumDuration(400)
-
-   def _on_zip_import_done(self, result: object) -> None:
-      r: playset_io.ImportResult = result  # type: ignore[assignment]
-      self._close_zip_progress()
-
-      self._prefs.collections.append(r.collection)
-      storage.save(self._prefs, "prefs.json")
-
-      # Reload mods so newly extracted ones are available.
-      self._refresh_game()
-      self._repopulate_coll_box(select=r.collection.name)
-
-      summary = r.summary()
-      if r.skipped_mods or r.unmatched:
-         details: list[str] = []
-         if r.skipped_mods:
-            details.append(
-               "Skipped (already installed):\n"
-               + "\n".join(f"  • {f}" for f in r.skipped_mods[:10])
-               + (f"\n  … and {len(r.skipped_mods) - 10} more" if len(r.skipped_mods) > 10 else "")
-            )
-         if r.unmatched:
-            details.append(
-               "Not matched to installed mods:\n"
-               + "\n".join(f"  • {n}" for n in r.unmatched[:10])
-               + (f"\n  … and {len(r.unmatched) - 10} more" if len(r.unmatched) > 10 else "")
-            )
-         QMessageBox.information(
-            self,
-            f'Imported "{r.collection.name}"',
-            f"{summary}\n\n" + "\n\n".join(details),
-         )
-      else:
-         self.statusBar().showMessage(
-            f'Imported "{r.collection.name}": {summary}', 8000
-         )
-
-   # ── shared ZIP helpers ────────────────────────────────────────────────────
-
-   def _on_zip_progress(self, done: int, total: int, name: str) -> None:
-      if self._zip_progress_dlg is None:
-         return
-      if total > 0:
-         self._zip_progress_dlg.setMaximum(total)
-      self._zip_progress_dlg.setValue(done)
-      if name:
-         self._zip_progress_dlg.setLabelText(f"Processing: {name}")
-
-   def _on_zip_worker_error(self, msg: str) -> None:
-      self._close_zip_progress()
-      show_error(self, "Error", msg)
-
-   def _close_zip_progress(self) -> None:
-      if self._zip_progress_dlg:
-         self._zip_progress_dlg.close()
-         self._zip_progress_dlg = None
-
-   # ── merged semantic mod (flatten full playset) ───────────────────────────
-
-   def _on_flatten_playset(self) -> None:
-      """Flatten the active playset into a single merged mod using the semantic engine."""
-      coll, game, user_data = self._resolve_playset_context()
-      if not coll or not game or not user_data:
-         return
-
-      from PySide6.QtWidgets import QInputDialog  # local import to keep header clean
-      default_name = f"Merged – {coll.name}"
-      mod_name, ok = QInputDialog.getText(
-         self,
-         "Flatten playset",
-         "Merged mod name:",
-         text=default_name,
-      )
-      if not ok:
-         return
-      mod_name = mod_name.strip()
-      if not mod_name:
-         show_warning(self, "Name required", "Please enter a mod name.")
-         return
-
-      out_dir = user_data / "mod"
-      target_dir = self._ensure_clean_mod_folder(out_dir, mod_name)
-      if target_dir is None:
-         return
-
-      ordered_mods = services.resolve_load_order(self._all_mods, coll)
-
-      worker = PatchBuildWorker(
-         mode="merge",
-         mods=ordered_mods,
-         conflicts={},  # not used in merge mode
-         out_dir=out_dir,
-         mod_name=mod_name,
-         parent=self,
-      )
-      self._merge_worker = worker  # keep a reference
-
-      def _on_done(result: PatchResult) -> None:
-         QMessageBox.information(
-            self,
-            "Merged mod created",
-            f"Merged mod written to:\n  {result.mod_dir}\n"
-            f"{result.files_written} files written.",
-         )
-         # Reload mods so the new merged mod appears in the UI.
-         self._refresh_game()
-
-      worker.finished.connect(_on_done)
-      worker.error.connect(lambda msg: show_error(self, "Error", msg))
-      worker.start()
-
-   # ── update check ──────────────────────────────────────────────────────────
-
-   def _start_update_check(self) -> None:
-      if not self._prefs.check_for_updates:
-         return
-      self._update_checker = updater.UpdateChecker(parent=self)
-      self._update_checker.update_available.connect(self._on_update_available)
-      self._update_checker.check_failed.connect(
-         lambda msg: self.statusBar().showMessage(
-            f"Update check failed: {msg}", 5000
-         )
-      )
-      self._update_checker.start()
-
-   def _on_update_available(self, info: updater.ReleaseInfo) -> None:
-      self._update_banner.show_update(info.version, info.html_url)
-
-   # ── settings ──────────────────────────────────────────────────────────────
-
-   def _on_settings(self) -> None:
-      dlg = SettingsDialog(self._prefs, parent=self)
-      if dlg.exec() == SettingsDialog.DialogCode.Accepted:
-         storage.save(self._prefs, "prefs.json")
-         if getattr(self._prefs, "font_size", 0):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Pyrony Mod Manager")
+        self.resize(960, 680)
+        
+        self._prefs: Preferences = storage.load_or_default(Preferences, "prefs.json")
+        self._all_mods: list = []
+        self._update_checker: updater.UpdateChecker
+        self._watcher: ModWatcher
+        self._zip_worker: playset_io.ZipExportWorker | playset_io.ZipImportWorker | None = None
+        self._zip_progress_dlg: QProgressDialog | None = None
+        
+        # ── top bar ──────────────────────────────────────────────────────────
+        self._game_box = QComboBox()
+        self._coll_box = QComboBox()
+        self._coll_box.setMinimumWidth(180)
+        
+        self._btn_new = QPushButton("＋ New")
+        self._btn_rename = QPushButton("✎ Rename")
+        self._btn_delete = QPushButton("🗑 Delete")
+        self._play_btn = QPushButton("▶ Play")
+        self._apply_btn = QPushButton("✔ Apply")
+        self._settings_btn = QPushButton("⚙")
+        
+        self._btn_new.setFixedWidth(80)
+        self._btn_rename.setFixedWidth(90)
+        self._btn_delete.setFixedWidth(80)
+        self._play_btn.setFixedWidth(90)
+        self._apply_btn.setFixedWidth(90)
+        self._settings_btn.setFixedWidth(32)
+        self._settings_btn.setToolTip("Settings")
+        
+        # ── import / export drop-down ─────────────────────────────────────────
+        self._io_btn = QToolButton()
+        self._io_btn.setText("⇅ I/O")
+        self._io_btn.setToolTip("Import / Export playset")
+        self._io_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._io_btn.setMenu(self._build_io_menu())
+        self._io_btn.setFixedWidth(72)
+        
+        for g in games.KNOWN_GAMES:
+            self._game_box.addItem(g.display_name, userData=g.id)
+        if self._prefs.active_game_id:
+            idx = self._game_box.findData(self._prefs.active_game_id)
+            if idx >= 0:
+                self._game_box.setCurrentIndex(idx)
+        
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Game:"))
+        top.addWidget(self._game_box)
+        top.addSpacing(12)
+        top.addWidget(QLabel("Collection:"))
+        top.addWidget(self._coll_box)
+        top.addWidget(self._btn_new)
+        top.addWidget(self._btn_rename)
+        top.addWidget(self._btn_delete)
+        top.addWidget(self._io_btn)
+        top.addStretch()
+        top.addWidget(self._apply_btn)
+        top.addSpacing(4)
+        top.addWidget(self._play_btn)
+        top.addSpacing(4)
+        top.addWidget(self._settings_btn)
+        
+        # ── update banner (hidden until an update is found) ───────────────────
+        self._update_banner = UpdateBanner()
+        
+        # ── tabs ──────────────────────────────────────────────────────────────
+        self._tabs = QTabWidget()
+        self._mod_list_widget = ModListWidget()
+        self._mod_list_widget.request_edit_dependencies.connect(self._on_request_edit_dependencies)
+        if getattr(self._prefs, "font_size", 0):
             self._mod_list_widget.set_font_size(self._prefs.font_size)
-         # Update semantic patch setting in conflicts view.
-         self._conflict_view.set_use_semantic_patch(
+        self._conflict_view = ConflictView()
+        self._conflict_view.patch_created.connect(self._on_patch_created)
+        self._conflict_view.request_patch.connect(self._on_request_patch)
+        # Let the Conflicts tab pull fresh playset mods right before scanning.
+        self._conflict_view.set_mods_provider(self._current_playset_mods)
+        self._conflict_view.set_use_semantic_patch(
             getattr(self._prefs, "use_semantic_patch", False)
-         )
-         self._refresh_game()
-         self.statusBar().showMessage("Settings saved.")
-
-   # ── watcher ───────────────────────────────────────────────────────────────
-
-   def _start_watcher(self, mod_dir: Path) -> None:
-      self._stop_watcher()
-      self._watcher = ModWatcher(mod_dir, parent=self)
-      self._watcher.mods_changed.connect(self._on_mods_changed)
-      self._watcher.start()
-
-   def _stop_watcher(self) -> None:
-      if hasattr(self, "_watcher") and self._watcher is not None:
-         self._watcher.stop()
-         self._watcher = None
-
-   def _on_mods_changed(self) -> None:
-      self.statusBar().showMessage("Mod directory changed — reloading…")
-      self._refresh_game()
-
-   # ── game / collection slots ───────────────────────────────────────────────
-
-   def _on_game_changed(self, _) -> None:
-      self._prefs.active_game_id = self._game_box.currentData()
-      storage.save(self._prefs, "prefs.json")
-      self._refresh_game()
-
-   def _on_collection_changed(self, _) -> None:
-      self._prefs.active_collection = self._coll_box.currentData() or ""
-      storage.save(self._prefs, "prefs.json")
-      self._refresh_list()
-      self._refresh_coll_buttons()
-
-   def _on_order_changed(self, new_order: list[str]) -> None:
-      if coll := self._active_collection():
-         coll.mods = new_order
-         storage.save(self._prefs, "prefs.json")
-         # Recompute dependency warning for the new order.
-         ordered_mods = services.resolve_load_order(self._all_mods, coll)
-         self._update_dependency_warning(ordered_mods)
-
-   # ── collection CRUD ───────────────────────────────────────────────────────
-
-   def _on_new_collection(self) -> None:
-      existing = self._collection_names_for_game()
-      dlg = CollectionNameDialog("New Collection", existing, parent=self)
-      if dlg.exec() != CollectionNameDialog.DialogCode.Accepted:
-         return
-      new_coll = ModCollection(
-         name=dlg.name, game_id=self._prefs.active_game_id
-      )
-      self._prefs.collections.append(new_coll)
-      storage.save(self._prefs, "prefs.json")
-      self._repopulate_coll_box(select=dlg.name)
-      self.statusBar().showMessage(f'Collection "{dlg.name}" created.')
-
-   def _on_rename_collection(self) -> None:
-      coll = self._active_collection()
-      if not coll:
-         return
-      existing = self._collection_names_for_game()
-      dlg = CollectionNameDialog(
-         "Rename Collection", existing, initial=coll.name, parent=self
-      )
-      if dlg.exec() != CollectionNameDialog.DialogCode.Accepted:
-         return
-      old_name = coll.name
-      coll.name = dlg.name
-      if self._prefs.active_collection == old_name:
-         self._prefs.active_collection = dlg.name
-      storage.save(self._prefs, "prefs.json")
-      self._repopulate_coll_box(select=dlg.name)
-      self.statusBar().showMessage(f'Renamed "{old_name}" → "{dlg.name}".')
-
-   def _on_delete_collection(self) -> None:
-      coll = self._active_collection()
-      if not coll:
-         return
-      answer = QMessageBox.question(
-         self,
-         "Delete Collection",
-         f'Delete collection "{coll.name}"?\nThis cannot be undone.',
-         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-         QMessageBox.StandardButton.No,
-      )
-      if answer != QMessageBox.StandardButton.Yes:
-         return
-      name = coll.name
-      self._prefs.collections = [
-         c for c in self._prefs.collections if c is not coll
-      ]
-      if self._prefs.active_collection == name:
-         self._prefs.active_collection = ""
-      storage.save(self._prefs, "prefs.json")
-      self._repopulate_coll_box()
-      self.statusBar().showMessage(f'Collection "{name}" deleted.')
-
-   # ── apply / play ──────────────────────────────────────────────────────────
-
-   def _apply_playset(self) -> Tuple[Game, Path] | None:
-      """
-      Write the active playset to the game's load-order files.
-      Returns (game, written_to) on success, or None when preconditions fail.
-      """
-      coll = self._active_collection()
-      game = games.get_game(self._prefs.active_game_id)
-      if not coll or not game:
-         self.statusBar().showMessage(
-            "Select a game and collection first.", 4000
-         )
-         return None
-
-      user_data = games.get_effective_user_data(game, self._prefs.game_paths)
-      if user_data is None:
-         show_warning(
-            self,
-            "No user-data path",
-            f"No user-data path is configured for {game.display_name}.\n"
-            "Set it in Settings → Game user-data paths.",
-         )
-         return None
-
-      path_existed = user_data.exists()
-
-      try:
-         written_to = launcher.write_launcher_files(
-            game, coll, self._all_mods,
-            game_paths=self._prefs.game_paths,
-         )
-      except Exception as exc:
-         show_error(self, "Apply error", exc)
-         return None
-
-      n = len(coll.mods)
-      self.statusBar().showMessage(
-         f"Playset applied — {n} mod(s) written to {written_to}", 6000
-      )
-
-      if not path_existed:
-         show_warning(
-            self,
-            "New directory created",
-            f"The directory\n  {written_to}\n"
-            "did not exist and was created now.\n\n"
-            "If your game stores data elsewhere, open Settings and set "
-            "the correct user-data path for this game.",
-         )
-
-      storage.save(self._prefs, "prefs.json")
-      return game, written_to
-
-   def _on_apply(self) -> None:
-      self._apply_playset()
-
-   def _on_play(self) -> None:
-      result = self._apply_playset()
-      if result is None:
-         return
-      game, _ = result
-      try:
-         launcher.launch_game(game)
-         self.statusBar().showMessage(f"Launching {game.display_name}…", 5000)
-      except Exception as exc:
-         show_error(self, "Launch error", exc)
-
-   # ── refresh helpers ───────────────────────────────────────────────────────
-
-   def _refresh_game(self) -> None:
-      game = games.get_game(self._prefs.active_game_id)
-      self._all_mods = []
-
-      user_data: Path | None = None
-      if game:
-         user_data = games.get_effective_user_data(game, self._prefs.game_paths)
-         mod_dir = games.get_mod_dir(game, self._prefs.game_paths)
-         if mod_dir and mod_dir.exists():
-            self._load_mods_for_game(mod_dir, game)
-         else:
-            self.statusBar().showMessage(f"Mod directory not found: {mod_dir}")
-
-      # Let the Conflicts tab know where the user-data lives (or None if unknown).
-      self._conflict_view.set_game_user_data(user_data)
-
-      self._repopulate_coll_box(select=self._prefs.active_collection or None)
-
-   def _load_mods_for_game(self, mod_dir, game):
-      self._all_mods = parser.discover_mods(mod_dir)
-
-      # Merge user-defined dependencies for this game into Mod.dependencies.
-      user_deps_for_game = self._prefs.user_dependencies.get(game.id, {})
-      for mod in self._all_mods:
-         if extra := user_deps_for_game.get(mod.id, []):
-            # Keep dependencies unique and preserve existing descriptor ones.
-            existing = set(mod.dependencies)
-            for dep_id in extra:
-               if dep_id not in existing:
-                  mod.dependencies.append(dep_id)
-                  existing.add(dep_id)
-
-      self.statusBar().showMessage(
-         f"Loaded {len(self._all_mods)} mods from {mod_dir}"
-      )
-      self._start_watcher(mod_dir)
-
-   def _repopulate_coll_box(self, select: str | None = None) -> None:
-      """Rebuild the collection combo for the current game without cascading signals."""
-      self._coll_box.blockSignals(True)
-      self._coll_box.clear()
-      for c in self._prefs.collections:
-         if c.game_id == self._prefs.active_game_id:
-            self._coll_box.addItem(c.name, userData=c.name)
-      if select:
-         idx = self._coll_box.findData(select)
-         if idx >= 0:
-            self._coll_box.setCurrentIndex(idx)
-      self._coll_box.blockSignals(False)
-      self._prefs.active_collection = self._coll_box.currentData() or ""
-      self._refresh_list()
-      self._refresh_coll_buttons()
-
-   def _refresh_list(self) -> None:
-      coll = self._active_collection()
-      ordered = coll.mods if coll else []
-      self._mod_list_widget.load_mods(self._all_mods, ordered)
-      ordered_mods = (
-         services.resolve_load_order(self._all_mods, coll)
-         if coll else self._all_mods
-      )
-      self._conflict_view.set_mods(ordered_mods)
-      # Update dependency-order warnings based on current load order.
-      self._update_dependency_warning(ordered_mods)
-
-   def _update_dependency_warning(self, ordered_mods: list[Mod]) -> None:
-      """
-      Warn when the active playset violates declared dependencies:
-      if A depends on B, B should appear earlier than A.
-      """
-      if not ordered_mods:
-         self._conflict_view.set_dependency_warning("")
-         return
-
-      id_to_index = {m.id: idx for idx, m in enumerate(ordered_mods)}
-      # Build a lookup by name as well, since descriptor dependencies
-      # may be stored as names.
-      name_to_id = {}
-      for m in ordered_mods:
-         # Prefer id; fall back to name
-         name_to_id.setdefault(m.name, m.id)
-
-      bad_pairs: list[tuple[str, str]] = []  # (dependent, dependency)
-
-      for m in ordered_mods:
-         idx = id_to_index.get(m.id, -1)
-         if idx < 0:
-            continue
-         for dep in m.dependencies:
-            # try by id, then by name
-            dep_id = dep if dep in id_to_index else name_to_id.get(dep)
-            if not dep_id or dep_id not in id_to_index:
-               continue
-            dep_idx = id_to_index[dep_id]
-            # dependency should be *before* dependent
-            if dep_idx > idx:
-               bad_pairs.append((m.name, next(d.name for d in ordered_mods if d.id == dep_id)))
-
-      if not bad_pairs:
-         self._conflict_view.set_dependency_warning("")
-         return
-
-      # Build a compact message; avoid spamming the user with a long list.
-      samples = bad_pairs[:5]
-      parts = [f"{dep} → {base}" for dep, base in samples]
-      extra = f" (and {len(bad_pairs) - 5} more)" if len(bad_pairs) > 5 else ""
-      msg = (
-            "Dependency order warning: some mods depend on others that are loaded after them. "
-            "Consider reordering your playset so dependencies come first. "
-            "Examples: " + ", ".join(parts) + extra
-      )
-      self._conflict_view.set_dependency_warning(msg)
-
-   def _on_request_edit_dependencies(self, mod: Mod) -> None:
-      """
-      Open the dependencies editor for the current game, with *mod* pre-selected.
-      Triggered via right-click on a mod in either list.
-      """
-      game_id = self._prefs.active_game_id
-      if not game_id:
-         self.statusBar().showMessage("Select a game before editing dependencies.", 4000)
-         return
-      from pmm.ui.dependencies_dialog import DependenciesDialog
-      dlg = DependenciesDialog(
-         self._prefs,
-         game_id,
-         parent=self,
-         initial_mod_id=mod.id,
-      )
-      if dlg.exec() == DependenciesDialog.DialogCode.Accepted:
-         # prefs.user_dependencies mutated in-place; reload mods so merged deps
-         # (descriptor + user-defined) are applied.
-         storage.save(self._prefs, "prefs.json")
-         self._refresh_game()
-
-   def _current_playset_mods(self) -> list[Mod]:
-      """Return mods in the active collection, in load-order, for conflict scans."""
-      coll = self._active_collection()
-      return services.resolve_load_order(self._all_mods, coll) if coll else []
-
-   def _resolve_playset_context(self) -> tuple[ModCollection | None, Game | None, Path | None]:
-      """
-      Resolve (collection, game, user_data) for the active playset.
-      Shows user-facing warnings on failure and returns (None, None, None).
-      """
-      coll = self._active_collection()
-      game = games.get_game(self._prefs.active_game_id)
-      if not coll or not game:
-         self.statusBar().showMessage("Select a game and collection first.", 4000)
-         return None, None, None
-
-      user_data = games.get_effective_user_data(game, self._prefs.game_paths)
-      if user_data is None:
-         show_warning(
-            self,
-            "No user-data path",
-            f"No user-data path is configured for {game.display_name}.\n"
-            "Set it in Settings → Game user-data paths.",
-         )
-         return None, None, None
-
-      return coll, game, user_data
-
-   def _ensure_clean_mod_folder(self, out_dir: Path, mod_name: str) -> Path | None:
-      """
-      Ensure that <out_dir>/<safe_folder_name(mod_name)> is empty by deleting
-      any existing folder. Returns the target directory, or None on failure.
-      """
-      folder = safe_folder_name(mod_name)
-      target_dir = out_dir / folder
-      if target_dir.exists():
-         try:
-            rmtree(target_dir)
-         except Exception as exc:
-            show_error(self, "Remove old mod folder failed", exc)
-            return None
-      return target_dir
-
-   def _on_request_patch(self) -> None:
-      """Handle 'Create patch mod' from the Conflicts tab, with optional semantic first."""
-      coll = self._active_collection()
-      game = games.get_game(self._prefs.active_game_id)
-      if not coll or not game:
-         self.statusBar().showMessage("Select a game and collection first.", 4000)
-         return
-
-      user_data = games.get_effective_user_data(game, self._prefs.game_paths)
-      if user_data is None:
-         show_warning(
-            self,
-            "No user-data path",
-            f"No user-data path is configured for {game.display_name}.\n"
-            "Set it in Settings → Game user-data paths.",
-         )
-         return
-
-      ordered_mods = self._current_playset_mods()
-      if not ordered_mods:
-         self.statusBar().showMessage("No mods in the current collection.", 4000)
-         return
-
-      use_semantic = getattr(self._prefs, "use_semantic_patch", False)
-      if not use_semantic:
-         # Directly open manual PatchDialog with the current conflicts.
-         dlg = PatchDialog(
-            self._conflict_view.conflicts,
-            ordered_mods,
-            user_data,
-            collection_name=coll.name,
-            parent=self,
-         )
-         dlg.patch_created.connect(self._on_patch_created)
-         dlg.exec()
-         return
-
-      # Semantic-first: run semantic patch mod builder in the background.
-      patch_name = patch_name_for_collection(coll.name)
-      out_dir = user_data / "mod"
-
-      # Remove any existing patch mod folder first to avoid stale files.
-      target_dir = self._ensure_clean_mod_folder(out_dir, patch_name)
-      if target_dir is None:
-         return
-
-      # Run semantic patch builder.
-      worker = PatchBuildWorker(
-         mode="patch",
-         mods=ordered_mods,
-         conflicts=self._conflict_view.conflicts,
-         out_dir=out_dir,
-         mod_name=patch_name,
-         parent=self,
-      )
-      self._semantic_worker = worker
-
-      def _on_semantic_done(result: PatchResult) -> None:
-         # Build a detailed summary of semantic decisions.
-         note_lines: list[str] = []
-         for n in result.notes:
-            note_lines.append(f"{n.rel_path} — {n.def_id}: {n.note}")
-
-         header = (
-            f"Patch mod written to:\n  {result.mod_dir}\n"
-            f"{result.files_written} files written.\n\n"
-         )
-         if note_lines:
-            body = "Semantic merge details:\n" + "\n".join(
-               f"  • {line}" for line in note_lines
+        )
+        self._tabs.addTab(self._mod_list_widget, "Load Order")
+        self._tabs.addTab(self._conflict_view, "Conflicts")
+        
+        # ── root layout ───────────────────────────────────────────────────────
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.addLayout(top)
+        layout.addWidget(self._update_banner)
+        layout.addWidget(self._tabs)
+        self.setCentralWidget(root)
+        self.setStatusBar(QStatusBar())
+        
+        # ── signals ───────────────────────────────────────────────────────────
+        self._game_box.currentIndexChanged.connect(self._on_game_changed)
+        self._coll_box.currentIndexChanged.connect(self._on_collection_changed)
+        self._mod_list_widget.order_changed.connect(self._on_order_changed)
+        self._btn_new.clicked.connect(self._on_new_collection)
+        self._btn_rename.clicked.connect(self._on_rename_collection)
+        self._btn_delete.clicked.connect(self._on_delete_collection)
+        self._apply_btn.clicked.connect(self._on_apply)
+        self._play_btn.clicked.connect(self._on_play)
+        self._settings_btn.clicked.connect(self._on_settings)
+        
+        self._refresh_game()
+        QTimer.singleShot(2000, self._start_update_check)
+    
+    # ── window lifecycle ──────────────────────────────────────────────────────
+    
+    def closeEvent(self, event) -> None:
+        self._stop_watcher()
+        super().closeEvent(event)
+    
+    # ── import / export menu ──────────────────────────────────────────────────
+    
+    def _build_io_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction("📥  Import playset (JSON…)", self._on_import_json)
+        menu.addAction("📤  Export playset (JSON…)", self._on_export_json)
+        menu.addSeparator()
+        menu.addAction("📦  Import playset (ZIP…)", self._on_import_zip)
+        menu.addAction("🗜   Export playset (ZIP…)", self._on_export_zip)
+        menu.addSeparator()
+        menu.addAction("🧬  Flatten playset into merged mod…", self._on_flatten_playset)
+        return menu
+    
+    # ── JSON export ───────────────────────────────────────────────────────────
+    
+    def _on_export_json(self) -> None:
+        coll = self._active_collection()
+        if not coll:
+            self.statusBar().showMessage("Select a collection to export.", 4000)
+            return
+        
+        default = str(Path.home() / playset_io.suggested_json_filename(coll))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Playset JSON", default, "JSON files (*.json)"
+        )
+        if not path:
+            return
+        
+        dest = Path(path)
+        try:
+            playset_io.export_launcher_json(coll, self._all_mods, dest)
+        except Exception as exc:
+            show_error(self, "Export error", exc)
+            return
+        
+        self.statusBar().showMessage(
+            f'Playset "{coll.name}" exported → {dest.name}', 6000
+        )
+    
+    # ── JSON import ───────────────────────────────────────────────────────────
+    
+    def _on_import_json(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Playset JSON", str(Path.home()),
+            "JSON files (*.json);;All files (*)"
+        )
+        if not path:
+            return
+        
+        src = Path(path)
+        game_id = self._prefs.active_game_id
+        if not game_id:
+            show_warning(
+                self,
+                "No game selected",
+                "Select a game before importing a playset.",
             )
-         else:
-            body = "No semantic notes were generated."
-
-         full_text = header + body
-
-         # Show the message in a scrollable dialog so very long texts
-         # don't exceed the screen height.
-         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
-
-         dlg_sem = QDialog(self)
-         dlg_sem.setWindowTitle("Semantic patch mod created")
-         dlg_sem.resize(700, 500)
-
-         layout = QVBoxLayout(dlg_sem)
-         edit = QTextEdit()
-         edit.setReadOnly(True)
-         edit.setPlainText(full_text)
-         layout.addWidget(edit)
-
-         ok_btn = QPushButton("OK")
-         ok_btn.clicked.connect(dlg_sem.accept)
-         layout.addWidget(ok_btn)
-
-         dlg_sem.exec()
-
-         # Reuse the same flow as manual PatchDialog:
-         #   • treat folder name as new mod id
-         #   • add it to the current collection
-         #   • set dependencies on all other mods in the playset.
-         folder_name = result.mod_dir.name
-         self._on_patch_created(folder_name, True)
-         # After adding the patch, re-scan conflicts to show what's left.
-         self._conflict_view._scan_btn.click()
-
-      worker.finished.connect(_on_semantic_done)
-      worker.error.connect(lambda msg: show_error(self, "Error", msg))
-      worker.start()
-
-   def _on_patch_created(self, folder: str, add_to_collection: bool) -> None:
-      """
-      When a patch mod is created, ensure it is part of the current collection
-      and depends on all other mods in that playset.
-      """
-      coll = self._active_collection()
-      if not coll:
-         return
-
-      # Now that the patch exists on disk, refresh mods to pick it up.
-      self._refresh_game()
-
-      # Find the patch mod by folder name (descriptor stem).
-      patch_id = folder  # Mod.id for local mods = descriptor stem
-      mods_by_id = {m.id: m for m in self._all_mods}
-      patch_mod = mods_by_id.get(patch_id)
-      if patch_mod is None:
-         self.statusBar().showMessage(
-            f"Patch mod '{patch_id}' was created but could not be found in the mod list.",
-            6000,
-         )
-         return
-
-      # Ensure the patch mod is in the current collection, at the end.
-      if patch_id not in coll.mods:
-         coll.mods.append(patch_id)
-
-      # Make the patch mod depend on all other mods currently in the playset.
-      # This uses mod IDs; elsewhere they are resolved against installed mods.
-      other_ids = [mid for mid in coll.mods if mid != patch_id]
-      patch_mod.dependencies = list(other_ids)
-
-      # Persist both the collection change and the effective dependencies.
-      storage.save(self._prefs, "prefs.json")
-
-      # Refresh UI to show it at the end and update conflict/dependency views.
-      self._repopulate_coll_box(select=coll.name)
-      self.statusBar().showMessage(
-         f"Patch mod '{patch_id}' added to '{coll.name}' with dependencies "
-         f"on all other mods in the playset.", 8000
-      )
-
-   def _refresh_coll_buttons(self) -> None:
-      has_coll = self._active_collection() is not None
-      self._btn_rename.setEnabled(has_coll)
-      self._btn_delete.setEnabled(has_coll)
-      self._apply_btn.setEnabled(has_coll)
-      self._play_btn.setEnabled(has_coll)
-      self._mod_list_widget.set_active_enabled(has_coll)
-
-   # ── helpers ───────────────────────────────────────────────────────────────
-
-   def _active_collection(self) -> Union[ModCollection, None]:
-      name = self._coll_box.currentData()
-      return next(
-         (
-            c for c in self._prefs.collections
-            if c.name == name and c.game_id == self._prefs.active_game_id
-         ),
-         None,
-      )
-
-   def _collection_names_for_game(self) -> set[str]:
-      return {
-         c.name for c in self._prefs.collections
-         if c.game_id == self._prefs.active_game_id
-      }
-
-   @staticmethod
-   def _unique_name(base: str, existing: set[str]) -> str:
-      """Return *base* or 'base (2)', 'base (3)', … until unique."""
-      if base not in existing:
-         return base
-      n = 2
-      while f"{base} ({n})" in existing:
-         n += 1
-      return f"{base} ({n})"
+            return
+        
+        # Reject duplicate names; the user can rename the collection afterwards.
+        existing = self._collection_names_for_game()
+        coll_name = src.stem
+        if coll_name in existing:
+            coll_name = self._unique_name(coll_name, existing)
+        
+        try:
+            result = playset_io.import_launcher_json(
+                src, game_id, self._all_mods, collection_name=coll_name
+            )
+        except Exception as exc:
+            show_error(self, "Import error", exc)
+            return
+        
+        self._prefs.collections.append(result.collection)
+        storage.save(self._prefs, "prefs.json")
+        self._repopulate_coll_box(select=result.collection.name)
+        
+        msg = f'Imported "{result.collection.name}": {result.summary()}'
+        if result.unmatched:
+            detail = ", ".join(result.unmatched[:5])
+            if len(result.unmatched) > 5:
+                detail += f" (+{len(result.unmatched) - 5} more)"
+            QMessageBox.information(
+                self, "Import complete",
+                f"{msg}\n\nNot found locally (may need to subscribe first):\n{detail}",
+            )
+        else:
+            self.statusBar().showMessage(msg, 6000)
+    
+    # ── ZIP export ────────────────────────────────────────────────────────────
+    
+    def _on_export_zip(self) -> None:
+        coll = self._active_collection()
+        if not coll:
+            self.statusBar().showMessage("Select a collection to export.", 4000)
+            return
+        
+        default = str(Path.home() / playset_io.suggested_zip_filename(coll))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Playset ZIP", default, "ZIP archives (*.zip)"
+        )
+        if not path:
+            return
+        
+        dest = Path(path)
+        total = len(coll.mods)
+        
+        self._init_zip_progress_dialog('Packing "', coll, total,
+                                       "Export Playset")
+        self._zip_worker = playset_io.ZipExportWorker(
+            coll, self._all_mods, dest, parent=self
+        )
+        assert self._zip_worker is not None
+        self._zip_worker.progress.connect(self._on_zip_progress)
+        self._zip_worker.finished.connect(self._on_zip_export_done)
+        self._zip_worker.error.connect(self._on_zip_worker_error)
+        self._zip_worker.start()
+    
+    def _on_zip_export_done(self, dest: Path) -> None:
+        self._close_zip_progress()
+        self.statusBar().showMessage(
+            f"Playset exported → {dest.name}  ({dest.stat().st_size // 1024:,} KB)", 8000
+        )
+    
+    # ── ZIP import ────────────────────────────────────────────────────────────
+    
+    def _on_import_zip(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Playset ZIP", str(Path.home()),
+            "ZIP archives (*.zip);;All files (*)"
+        )
+        if not path:
+            return
+        
+        src = Path(path)
+        game_id = self._prefs.active_game_id
+        game = games.get_game(game_id)
+        if not game:
+            show_warning(
+                self,
+                "No game selected",
+                "Select a game before importing a playset.",
+            )
+            return
+        
+        # Resolve the mod directory; prefer the effective (override-aware) path.
+        user_data = games.get_effective_user_data(game, self._prefs.game_paths)
+        mod_dir = (user_data / "mod") if user_data else games.get_mod_dir(game)
+        if mod_dir is None:
+            show_warning(
+                self, "No mod directory",
+                f"Could not determine the mod directory for {game.display_name}.\n"
+                "Set it in Settings → Game user-data paths.",
+            )
+            return
+        
+        # Ask once about overwrite policy.
+        reply = QMessageBox.question(
+            self,
+            "Import ZIP — existing mods",
+            "What should happen when a mod folder already exists?\n\n"
+            "Yes    — overwrite with the version from the ZIP\n"
+            "No     — keep the installed version (skip that mod)",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+        overwrite = reply == QMessageBox.StandardButton.Yes
+        
+        # Derive collection name; make it unique.
+        existing = self._collection_names_for_game()
+        coll_name = self._unique_name(src.stem, existing)
+        
+        self._init_zip_progress_dialog('Extracting "', src, 0,
+                                       "Import Playset")
+        self._zip_worker = playset_io.ZipImportWorker(
+            src, game_id, mod_dir, overwrite, coll_name, parent=self
+        )
+        assert self._zip_worker is not None
+        self._zip_worker.progress.connect(self._on_zip_progress)
+        self._zip_worker.finished.connect(self._on_zip_import_done)
+        self._zip_worker.error.connect(self._on_zip_worker_error)
+        self._zip_worker.start()
+    
+    def _init_zip_progress_dialog(self, arg0, arg1, arg2, arg3):
+        self._zip_progress_dlg = QProgressDialog(f'{arg0}{arg1.name}"…', "", 0,
+                                                 arg2, self)
+        assert self._zip_progress_dlg is not None
+        self._zip_progress_dlg.setWindowTitle(arg3)
+        self._zip_progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        self._zip_progress_dlg.setMinimumDuration(400)
+    
+    def _on_zip_import_done(self, result: object) -> None:
+        r: playset_io.ImportResult = result  # type: ignore[assignment]
+        self._close_zip_progress()
+        
+        self._prefs.collections.append(r.collection)
+        storage.save(self._prefs, "prefs.json")
+        
+        # Reload mods so newly extracted ones are available.
+        self._refresh_game()
+        self._repopulate_coll_box(select=r.collection.name)
+        
+        summary = r.summary()
+        if r.skipped_mods or r.unmatched:
+            details: list[str] = []
+            if r.skipped_mods:
+                details.append(
+                    "Skipped (already installed):\n"
+                    + "\n".join(f"  • {f}" for f in r.skipped_mods[:10])
+                    + (f"\n  … and {len(r.skipped_mods) - 10} more" if len(
+                        r.skipped_mods) > 10 else "")
+                )
+            if r.unmatched:
+                details.append(
+                    "Not matched to installed mods:\n"
+                    + "\n".join(f"  • {n}" for n in r.unmatched[:10])
+                    + (f"\n  … and {len(r.unmatched) - 10} more" if len(r.unmatched) > 10 else "")
+                )
+            QMessageBox.information(
+                self,
+                f'Imported "{r.collection.name}"',
+                f"{summary}\n\n" + "\n\n".join(details),
+            )
+        else:
+            self.statusBar().showMessage(
+                f'Imported "{r.collection.name}": {summary}', 8000
+            )
+    
+    # ── shared ZIP helpers ────────────────────────────────────────────────────
+    
+    def _on_zip_progress(self, done: int, total: int, name: str) -> None:
+        if self._zip_progress_dlg is None:
+            return
+        if total > 0:
+            self._zip_progress_dlg.setMaximum(total)
+        self._zip_progress_dlg.setValue(done)
+        if name:
+            self._zip_progress_dlg.setLabelText(f"Processing: {name}")
+    
+    def _on_zip_worker_error(self, msg: str) -> None:
+        self._close_zip_progress()
+        show_error(self, "Error", msg)
+    
+    def _close_zip_progress(self) -> None:
+        if self._zip_progress_dlg:
+            self._zip_progress_dlg.close()
+            self._zip_progress_dlg = None
+    
+    # ── merged semantic mod (flatten full playset) ───────────────────────────
+    
+    def _on_flatten_playset(self) -> None:
+        """Flatten the active playset into a single merged mod using the semantic engine."""
+        coll, game, user_data = self._resolve_playset_context()
+        if not coll or not game or not user_data:
+            return
+        
+        from PySide6.QtWidgets import QInputDialog  # local import to keep header clean
+        default_name = f"Merged – {coll.name}"
+        mod_name, ok = QInputDialog.getText(
+            self,
+            "Flatten playset",
+            "Merged mod name:",
+            text=default_name,
+        )
+        if not ok:
+            return
+        mod_name = mod_name.strip()
+        if not mod_name:
+            show_warning(self, "Name required", "Please enter a mod name.")
+            return
+        
+        out_dir = user_data / "mod"
+        target_dir = self._ensure_clean_mod_folder(out_dir, mod_name)
+        if target_dir is None:
+            return
+        
+        ordered_mods = services.resolve_load_order(self._all_mods, coll)
+        
+        worker = PatchBuildWorker(
+            mode="merge",
+            mods=ordered_mods,
+            conflicts={},  # not used in merge mode
+            out_dir=out_dir,
+            mod_name=mod_name,
+            parent=self,
+        )
+        self._merge_worker = worker  # keep a reference
+        
+        def _on_done(result: PatchResult) -> None:
+            QMessageBox.information(
+                self,
+                "Merged mod created",
+                f"Merged mod written to:\n  {result.mod_dir}\n"
+                f"{result.files_written} files written.",
+            )
+            # Reload mods so the new merged mod appears in the UI.
+            self._refresh_game()
+        
+        worker.finished.connect(_on_done)
+        worker.error.connect(lambda msg: show_error(self, "Error", msg))
+        worker.start()
+    
+    # ── update check ──────────────────────────────────────────────────────────
+    
+    def _start_update_check(self) -> None:
+        if not self._prefs.check_for_updates:
+            return
+        self._update_checker = updater.UpdateChecker(parent=self)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.check_failed.connect(
+            lambda msg: self.statusBar().showMessage(
+                f"Update check failed: {msg}", 5000
+            )
+        )
+        self._update_checker.start()
+    
+    def _on_update_available(self, info: updater.ReleaseInfo) -> None:
+        self._update_banner.show_update(info.version, info.html_url)
+    
+    # ── settings ──────────────────────────────────────────────────────────────
+    
+    def _on_settings(self) -> None:
+        dlg = SettingsDialog(self._prefs, parent=self)
+        if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+            storage.save(self._prefs, "prefs.json")
+            if getattr(self._prefs, "font_size", 0):
+                self._mod_list_widget.set_font_size(self._prefs.font_size)
+            # Update semantic patch setting in conflicts view.
+            self._conflict_view.set_use_semantic_patch(
+                getattr(self._prefs, "use_semantic_patch", False)
+            )
+            self._refresh_game()
+            self.statusBar().showMessage("Settings saved.")
+    
+    # ── watcher ───────────────────────────────────────────────────────────────
+    
+    def _start_watcher(self, mod_dir: Path) -> None:
+        self._stop_watcher()
+        self._watcher = ModWatcher(mod_dir, parent=self)
+        self._watcher.mods_changed.connect(self._on_mods_changed)
+        self._watcher.start()
+    
+    def _stop_watcher(self) -> None:
+        if hasattr(self, "_watcher") and self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
+    
+    def _on_mods_changed(self) -> None:
+        self.statusBar().showMessage("Mod directory changed — reloading…")
+        self._refresh_game()
+    
+    # ── game / collection slots ───────────────────────────────────────────────
+    
+    def _on_game_changed(self, _) -> None:
+        self._prefs.active_game_id = self._game_box.currentData()
+        storage.save(self._prefs, "prefs.json")
+        self._refresh_game()
+    
+    def _on_collection_changed(self, _) -> None:
+        self._prefs.active_collection = self._coll_box.currentData() or ""
+        storage.save(self._prefs, "prefs.json")
+        self._refresh_list()
+        self._refresh_coll_buttons()
+    
+    def _on_order_changed(self, new_order: list[str]) -> None:
+        if coll := self._active_collection():
+            coll.mods = new_order
+            storage.save(self._prefs, "prefs.json")
+            # Recompute dependency warning for the new order.
+            ordered_mods = services.resolve_load_order(self._all_mods, coll)
+            self._update_dependency_warning(ordered_mods)
+    
+    # ── collection CRUD ───────────────────────────────────────────────────────
+    
+    def _on_new_collection(self) -> None:
+        existing = self._collection_names_for_game()
+        dlg = CollectionNameDialog("New Collection", existing, parent=self)
+        if dlg.exec() != CollectionNameDialog.DialogCode.Accepted:
+            return
+        new_coll = ModCollection(
+            name=dlg.name, game_id=self._prefs.active_game_id
+        )
+        self._prefs.collections.append(new_coll)
+        storage.save(self._prefs, "prefs.json")
+        self._repopulate_coll_box(select=dlg.name)
+        self.statusBar().showMessage(f'Collection "{dlg.name}" created.')
+    
+    def _on_rename_collection(self) -> None:
+        coll = self._active_collection()
+        if not coll:
+            return
+        existing = self._collection_names_for_game()
+        dlg = CollectionNameDialog(
+            "Rename Collection", existing, initial=coll.name, parent=self
+        )
+        if dlg.exec() != CollectionNameDialog.DialogCode.Accepted:
+            return
+        old_name = coll.name
+        coll.name = dlg.name
+        if self._prefs.active_collection == old_name:
+            self._prefs.active_collection = dlg.name
+        storage.save(self._prefs, "prefs.json")
+        self._repopulate_coll_box(select=dlg.name)
+        self.statusBar().showMessage(f'Renamed "{old_name}" → "{dlg.name}".')
+    
+    def _on_delete_collection(self) -> None:
+        coll = self._active_collection()
+        if not coll:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete Collection",
+            f'Delete collection "{coll.name}"?\nThis cannot be undone.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        name = coll.name
+        self._prefs.collections = [
+            c for c in self._prefs.collections if c is not coll
+        ]
+        if self._prefs.active_collection == name:
+            self._prefs.active_collection = ""
+        storage.save(self._prefs, "prefs.json")
+        self._repopulate_coll_box()
+        self.statusBar().showMessage(f'Collection "{name}" deleted.')
+    
+    # ── apply / play ──────────────────────────────────────────────────────────
+    
+    def _apply_playset(self) -> Tuple[Game, Path] | None:
+        """
+        Write the active playset to the game's load-order files.
+        Returns (game, written_to) on success, or None when preconditions fail.
+        """
+        coll = self._active_collection()
+        game = games.get_game(self._prefs.active_game_id)
+        if not coll or not game:
+            self.statusBar().showMessage(
+                "Select a game and collection first.", 4000
+            )
+            return None
+        
+        user_data = games.get_effective_user_data(game, self._prefs.game_paths)
+        if user_data is None:
+            show_warning(
+                self,
+                "No user-data path",
+                f"No user-data path is configured for {game.display_name}.\n"
+                "Set it in Settings → Game user-data paths.",
+            )
+            return None
+        
+        path_existed = user_data.exists()
+        
+        try:
+            written_to = launcher.write_launcher_files(
+                game, coll, self._all_mods,
+                game_paths=self._prefs.game_paths,
+            )
+        except Exception as exc:
+            show_error(self, "Apply error", exc)
+            return None
+        
+        n = len(coll.mods)
+        self.statusBar().showMessage(
+            f"Playset applied — {n} mod(s) written to {written_to}", 6000
+        )
+        
+        if not path_existed:
+            show_warning(
+                self,
+                "New directory created",
+                f"The directory\n  {written_to}\n"
+                "did not exist and was created now.\n\n"
+                "If your game stores data elsewhere, open Settings and set "
+                "the correct user-data path for this game.",
+            )
+        
+        storage.save(self._prefs, "prefs.json")
+        return game, written_to
+    
+    def _on_apply(self) -> None:
+        self._apply_playset()
+    
+    def _on_play(self) -> None:
+        result = self._apply_playset()
+        if result is None:
+            return
+        game, _ = result
+        try:
+            launcher.launch_game(game)
+            self.statusBar().showMessage(f"Launching {game.display_name}…", 5000)
+        except Exception as exc:
+            show_error(self, "Launch error", exc)
+    
+    # ── refresh helpers ───────────────────────────────────────────────────────
+    
+    def _refresh_game(self) -> None:
+        game = games.get_game(self._prefs.active_game_id)
+        self._all_mods = []
+        
+        user_data: Path | None = None
+        if game:
+            user_data = games.get_effective_user_data(game, self._prefs.game_paths)
+            mod_dir = games.get_mod_dir(game, self._prefs.game_paths)
+            if mod_dir and mod_dir.exists():
+                self._load_mods_for_game(mod_dir, game)
+            else:
+                self.statusBar().showMessage(f"Mod directory not found: {mod_dir}")
+        
+        # Let the Conflicts tab know where the user-data lives (or None if unknown).
+        self._conflict_view.set_game_user_data(user_data)
+        
+        self._repopulate_coll_box(select=self._prefs.active_collection or None)
+    
+    def _load_mods_for_game(self, mod_dir, game):
+        self._all_mods = parser.discover_mods(mod_dir)
+        
+        # Merge user-defined dependencies for this game into Mod.dependencies.
+        user_deps_for_game = self._prefs.user_dependencies.get(game.id, {})
+        for mod in self._all_mods:
+            if extra := user_deps_for_game.get(mod.id, []):
+                # Keep dependencies unique and preserve existing descriptor ones.
+                existing = set(mod.dependencies)
+                for dep_id in extra:
+                    if dep_id not in existing:
+                        mod.dependencies.append(dep_id)
+                        existing.add(dep_id)
+        
+        self.statusBar().showMessage(
+            f"Loaded {len(self._all_mods)} mods from {mod_dir}"
+        )
+        self._start_watcher(mod_dir)
+    
+    def _repopulate_coll_box(self, select: str | None = None) -> None:
+        """Rebuild the collection combo for the current game without cascading signals."""
+        self._coll_box.blockSignals(True)
+        self._coll_box.clear()
+        for c in self._prefs.collections:
+            if c.game_id == self._prefs.active_game_id:
+                self._coll_box.addItem(c.name, userData=c.name)
+        if select:
+            idx = self._coll_box.findData(select)
+            if idx >= 0:
+                self._coll_box.setCurrentIndex(idx)
+        self._coll_box.blockSignals(False)
+        self._prefs.active_collection = self._coll_box.currentData() or ""
+        self._refresh_list()
+        self._refresh_coll_buttons()
+    
+    def _refresh_list(self) -> None:
+        coll = self._active_collection()
+        ordered = coll.mods if coll else []
+        self._mod_list_widget.load_mods(self._all_mods, ordered)
+        ordered_mods = (
+            services.resolve_load_order(self._all_mods, coll)
+            if coll else self._all_mods
+        )
+        self._conflict_view.set_mods(ordered_mods)
+        # Update dependency-order warnings based on current load order.
+        self._update_dependency_warning(ordered_mods)
+    
+    def _update_dependency_warning(self, ordered_mods: list[Mod]) -> None:
+        """
+        Warn when the active playset violates declared dependencies:
+        if A depends on B, B should appear earlier than A.
+        """
+        if not ordered_mods:
+            self._conflict_view.set_dependency_warning("")
+            return
+        
+        id_to_index = {m.id: idx for idx, m in enumerate(ordered_mods)}
+        # Build a lookup by name as well, since descriptor dependencies
+        # may be stored as names.
+        name_to_id = {}
+        for m in ordered_mods:
+            # Prefer id; fall back to name
+            name_to_id.setdefault(m.name, m.id)
+        
+        bad_pairs: list[tuple[str, str]] = []  # (dependent, dependency)
+        
+        for m in ordered_mods:
+            idx = id_to_index.get(m.id, -1)
+            if idx < 0:
+                continue
+            for dep in m.dependencies:
+                # try by id, then by name
+                dep_id = dep if dep in id_to_index else name_to_id.get(dep)
+                if not dep_id or dep_id not in id_to_index:
+                    continue
+                dep_idx = id_to_index[dep_id]
+                # dependency should be *before* dependent
+                if dep_idx > idx:
+                    bad_pairs.append((m.name, next(d.name for d in ordered_mods if d.id == dep_id)))
+        
+        if not bad_pairs:
+            self._conflict_view.set_dependency_warning("")
+            return
+        
+        # Build a compact message; avoid spamming the user with a long list.
+        samples = bad_pairs[:5]
+        parts = [f"{dep} → {base}" for dep, base in samples]
+        extra = f" (and {len(bad_pairs) - 5} more)" if len(bad_pairs) > 5 else ""
+        msg = (
+                "Dependency order warning: some mods depend on others that are loaded after them. "
+                "Consider reordering your playset so dependencies come first. "
+                "Examples: " + ", ".join(parts) + extra
+        )
+        self._conflict_view.set_dependency_warning(msg)
+    
+    def _on_request_edit_dependencies(self, mod: Mod) -> None:
+        """
+        Open the dependencies editor for the current game, with *mod* pre-selected.
+        Triggered via right-click on a mod in either list.
+        """
+        game_id = self._prefs.active_game_id
+        if not game_id:
+            self.statusBar().showMessage("Select a game before editing dependencies.", 4000)
+            return
+        from pmm.ui.dependencies_dialog import DependenciesDialog
+        dlg = DependenciesDialog(
+            self._prefs,
+            game_id,
+            parent=self,
+            initial_mod_id=mod.id,
+        )
+        if dlg.exec() == DependenciesDialog.DialogCode.Accepted:
+            # prefs.user_dependencies mutated in-place; reload mods so merged deps
+            # (descriptor + user-defined) are applied.
+            storage.save(self._prefs, "prefs.json")
+            self._refresh_game()
+    
+    def _current_playset_mods(self) -> list[Mod]:
+        """Return mods in the active collection, in load-order, for conflict scans."""
+        coll = self._active_collection()
+        return services.resolve_load_order(self._all_mods, coll) if coll else []
+    
+    def _resolve_playset_context(self) -> tuple[ModCollection | None, Game | None, Path | None]:
+        """
+        Resolve (collection, game, user_data) for the active playset.
+        Shows user-facing warnings on failure and returns (None, None, None).
+        """
+        coll = self._active_collection()
+        game = games.get_game(self._prefs.active_game_id)
+        if not coll or not game:
+            self.statusBar().showMessage("Select a game and collection first.", 4000)
+            return None, None, None
+        
+        user_data = games.get_effective_user_data(game, self._prefs.game_paths)
+        if user_data is None:
+            show_warning(
+                self,
+                "No user-data path",
+                f"No user-data path is configured for {game.display_name}.\n"
+                "Set it in Settings → Game user-data paths.",
+            )
+            return None, None, None
+        
+        return coll, game, user_data
+    
+    def _ensure_clean_mod_folder(self, out_dir: Path, mod_name: str) -> Path | None:
+        """
+        Ensure that <out_dir>/<safe_folder_name(mod_name)> is empty by deleting
+        any existing folder. Returns the target directory, or None on failure.
+        """
+        folder = safe_folder_name(mod_name)
+        target_dir = out_dir / folder
+        if target_dir.exists():
+            try:
+                rmtree(target_dir)
+            except Exception as exc:
+                show_error(self, "Remove old mod folder failed", exc)
+                return None
+        return target_dir
+    
+    def _on_request_patch(self) -> None:
+        """Handle 'Create patch mod' from the Conflicts tab, with optional semantic first."""
+        coll = self._active_collection()
+        game = games.get_game(self._prefs.active_game_id)
+        if not coll or not game:
+            self.statusBar().showMessage("Select a game and collection first.", 4000)
+            return
+        
+        user_data = games.get_effective_user_data(game, self._prefs.game_paths)
+        if user_data is None:
+            show_warning(
+                self,
+                "No user-data path",
+                f"No user-data path is configured for {game.display_name}.\n"
+                "Set it in Settings → Game user-data paths.",
+            )
+            return
+        
+        ordered_mods = self._current_playset_mods()
+        if not ordered_mods:
+            self.statusBar().showMessage("No mods in the current collection.", 4000)
+            return
+        
+        use_semantic = getattr(self._prefs, "use_semantic_patch", False)
+        if not use_semantic:
+            # Directly open manual PatchDialog with the current conflicts.
+            dlg = PatchDialog(
+                self._conflict_view.conflicts,
+                ordered_mods,
+                user_data,
+                collection_name=coll.name,
+                parent=self,
+            )
+            dlg.patch_created.connect(self._on_patch_created)
+            dlg.exec()
+            return
+        
+        # Semantic-first: run semantic patch mod builder in the background.
+        patch_name = patch_name_for_collection(coll.name)
+        out_dir = user_data / "mod"
+        
+        # Remove any existing patch mod folder first to avoid stale files.
+        target_dir = self._ensure_clean_mod_folder(out_dir, patch_name)
+        if target_dir is None:
+            return
+        
+        # Run semantic patch builder.
+        worker = PatchBuildWorker(
+            mode="patch",
+            mods=ordered_mods,
+            conflicts=self._conflict_view.conflicts,
+            out_dir=out_dir,
+            mod_name=patch_name,
+            parent=self,
+        )
+        self._semantic_worker = worker
+        
+        def _on_semantic_done(result: PatchResult) -> None:
+            # Build a detailed summary of semantic decisions.
+            note_lines: list[str] = []
+            for n in result.notes:
+                note_lines.append(f"{n.rel_path} — {n.def_id}: {n.note}")
+            
+            header = (
+                f"Patch mod written to:\n  {result.mod_dir}\n"
+                f"{result.files_written} files written.\n\n"
+            )
+            if note_lines:
+                body = "Semantic merge details:\n" + "\n".join(
+                    f"  • {line}" for line in note_lines
+                )
+            else:
+                body = "No semantic notes were generated."
+            
+            full_text = header + body
+            
+            # Show the message in a scrollable dialog so very long texts
+            # don't exceed the screen height.
+            from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+            
+            dlg_sem = QDialog(self)
+            dlg_sem.setWindowTitle("Semantic patch mod created")
+            dlg_sem.resize(700, 500)
+            
+            layout = QVBoxLayout(dlg_sem)
+            edit = QTextEdit()
+            edit.setReadOnly(True)
+            edit.setPlainText(full_text)
+            layout.addWidget(edit)
+            
+            ok_btn = QPushButton("OK")
+            ok_btn.clicked.connect(dlg_sem.accept)
+            layout.addWidget(ok_btn)
+            
+            dlg_sem.exec()
+            
+            # Reuse the same flow as manual PatchDialog:
+            #   • treat folder name as new mod id
+            #   • add it to the current collection
+            #   • set dependencies on all other mods in the playset.
+            folder_name = result.mod_dir.name
+            self._on_patch_created(folder_name, True)
+            # After adding the patch, re-scan conflicts to show what's left.
+            self._conflict_view._scan_btn.click()
+        
+        worker.finished.connect(_on_semantic_done)
+        worker.error.connect(lambda msg: show_error(self, "Error", msg))
+        worker.start()
+    
+    def _on_patch_created(self, folder: str, add_to_collection: bool) -> None:
+        """
+        When a patch mod is created, ensure it is part of the current collection
+        and depends on all other mods in that playset.
+        """
+        coll = self._active_collection()
+        if not coll:
+            return
+        
+        # Now that the patch exists on disk, refresh mods to pick it up.
+        self._refresh_game()
+        
+        # Find the patch mod by folder name (descriptor stem).
+        patch_id = folder  # Mod.id for local mods = descriptor stem
+        mods_by_id = {m.id: m for m in self._all_mods}
+        patch_mod = mods_by_id.get(patch_id)
+        if patch_mod is None:
+            self.statusBar().showMessage(
+                f"Patch mod '{patch_id}' was created but could not be found in the mod list.",
+                6000,
+            )
+            return
+        
+        # Ensure the patch mod is in the current collection, at the end.
+        if patch_id not in coll.mods:
+            coll.mods.append(patch_id)
+        
+        # Make the patch mod depend on all other mods currently in the playset.
+        # This uses mod IDs; elsewhere they are resolved against installed mods.
+        other_ids = [mid for mid in coll.mods if mid != patch_id]
+        patch_mod.dependencies = list(other_ids)
+        
+        # Persist both the collection change and the effective dependencies.
+        storage.save(self._prefs, "prefs.json")
+        
+        # Refresh UI to show it at the end and update conflict/dependency views.
+        self._repopulate_coll_box(select=coll.name)
+        self.statusBar().showMessage(
+            f"Patch mod '{patch_id}' added to '{coll.name}' with dependencies "
+            f"on all other mods in the playset.", 8000
+        )
+    
+    def _refresh_coll_buttons(self) -> None:
+        has_coll = self._active_collection() is not None
+        self._btn_rename.setEnabled(has_coll)
+        self._btn_delete.setEnabled(has_coll)
+        self._apply_btn.setEnabled(has_coll)
+        self._play_btn.setEnabled(has_coll)
+        self._mod_list_widget.set_active_enabled(has_coll)
+    
+    # ── helpers ───────────────────────────────────────────────────────────────
+    
+    def _active_collection(self) -> Union[ModCollection, None]:
+        name = self._coll_box.currentData()
+        return next(
+            (
+                c for c in self._prefs.collections
+                if c.name == name and c.game_id == self._prefs.active_game_id
+            ),
+            None,
+        )
+    
+    def _collection_names_for_game(self) -> set[str]:
+        return {
+            c.name for c in self._prefs.collections
+            if c.game_id == self._prefs.active_game_id
+        }
+    
+    @staticmethod
+    def _unique_name(base: str, existing: set[str]) -> str:
+        """Return *base* or 'base (2)', 'base (3)', … until unique."""
+        if base not in existing:
+            return base
+        n = 2
+        while f"{base} ({n})" in existing:
+            n += 1
+        return f"{base} ({n})"

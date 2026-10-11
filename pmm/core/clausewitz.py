@@ -1,311 +1,440 @@
-"""
-pmm_clausewitz
-==============
-Tokeniser, parser, AST, serialiser, and definition-extractor for
-the Clausewitz scripting language used by all modern Paradox games.
+"""Lossless-enough Clausewitz parser used by Pyrony's semantic layer.
 
-Clausewitz syntax in brief
---------------------------
-  key = value                     # scalar assignment
-  key = { … }                     # block assignment
-  key >= value                    # comparative assignment (triggers/conditions)
-  { value value … }               # bare list (inside a block)
-  # comment to end of line
-
-Public API
-----------
-  parse_file(path)  -> CWFile
-  parse_text(text, path?) -> CWFile
-
-  CWFile.top_pairs()   -> list[CWPair]
-  CWFile.definitions() -> dict[str, CWPair]
-      Stable key format:
-        named block   →  "key.inner_id"   e.g. "country_event.100"
-        unnamed block →  "key@N"          N = per-key positional index
-        scalar pair   →  "key"
-
-  unparse(node, depth?) -> str
-  unparse_pair(pair)    -> str
+The AST preserves scalar kinds, quoting, comments, duplicate statements and
+source positions.  Whitespace is canonicalised when serialising; comments and
+statement order are retained.  Invalid input raises :class:`CWParseError`
+instead of producing a partial tree.
 """
 
+import codecs
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import auto, Enum
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Iterable, TypeAlias
 
 
-# ── AST nodes ─────────────────────────────────────────────────────────────────
-
-class CWRaw(str):
-   """Bare value inside a block (NUMBER/DATE/IDENT etc. not attached to a key)."""
-   pass
-
-
-Value = Union["CWBlock", str]
-
-
-@dataclass
-class CWBlock:
-   """A { … } block; items are CWPair nodes or bare values."""
-   items: List[Union["CWPair", CWRaw, "CWBlock"]] = field(default_factory=list)
+class CWParseError(ValueError):
+    """A syntax error with source location information."""
+    
+    def __init__(self, message: str, line: int, column: int,
+                 path: Path | None = None) -> None:
+        location = f"{path or '<text>'}:{line}:{column}"
+        super().__init__(f"{location}: {message}")
+        self.message = message
+        self.line = line
+        self.column = column
+        self.path = path
 
 
-@dataclass
-class CWPair:
-   """key OP value  (OP is usually '=', but may be >, <, >=, <=, !=)."""
-   key: str
-   op: str
-   value: Value
-   line: int = 0
+class ScalarKind(Enum):
+    IDENTIFIER = auto()
+    STRING = auto()
+    INTEGER = auto()
+    DECIMAL = auto()
+    BOOLEAN = auto()
+    DATE = auto()
+    METAPROGRAM = auto()
 
 
-@dataclass
-class CWFile:
-   path: Path
-   root: CWBlock
-
-   def top_pairs(self) -> List[CWPair]:
-      """All top-level CWPair nodes (ignores bare list values)."""
-      return [x for x in self.root.items if isinstance(x, CWPair)]
-
-   def definitions(self) -> Dict[str, CWPair]:
-      """
-      Map each top-level definition to a stable string key.
-
-      Key generation rules (in priority order):
-        1. Named block  — block contains an inner 'id', 'name', 'token',
-                          'tag', 'key', 'type', or 'title' key
-                          → "outer_key.inner_value"
-                          e.g.  country_event = { id = 100 }  →  "country_event.100"
-
-        2. Unnamed block — block has no identity key
-                          → "outer_key@N"  where N is a per-outer-key counter
-                          Positional index (not line number) so definitions
-                          stay comparable across files that differ only in
-                          whitespace / comments.
-
-        3. Scalar pair  → "outer_key"
-
-      Last definition with the same key wins within a single file,
-      mirroring Clausewitz load order semantics.
-      """
-      result: Dict[str, CWPair] = {}
-      unnamed_counts: Dict[str, int] = defaultdict(int)
-      for pair in self.top_pairs():
-         if isinstance(pair.value, CWBlock):
-            if inner := _inner_id(pair.value):
-               def_key = f"{pair.key}.{inner}"
-            else:
-               n = unnamed_counts[pair.key]
-               unnamed_counts[pair.key] += 1
-               def_key = f"{pair.key}@{n}"
-         else:
-            def_key = pair.key
-         result[def_key] = pair  # last one wins
-      return result
-
-   def definition_names(self) -> set[str]:
-      """Return just the set of definition keys (cheaper than full definitions())."""
-      return set(self.definitions().keys())
+@dataclass(frozen=True, slots=True)
+class CWScalar:
+    text: str
+    kind: ScalarKind = ScalarKind.IDENTIFIER
+    quoted: bool = False
+    line: int = 0
+    column: int = 0
+    
+    def __str__(self) -> str:
+        return self.text
 
 
-# ── identity-key detection ────────────────────────────────────────────────────
-
-# Keys inside a block that unambiguously identify the definition.
-# Ordered so the most common ones are checked first.
-_ID_KEYS = frozenset({
-   "id",  # events, provinces, …
-   "name",  # buildings, technologies, …
-   "token",  # decisions (HOI4, CK3)
-   "tag",  # country tags (EU4, HOI4)
-   "key",  # modifiers, localisation
-   "type",  # component_templates (Stellaris)
-   "title",  # laws (Vic3)
-})
-
-
-def _inner_id(block: CWBlock) -> str | None:
-   """Return the string value of the first identity key inside a block."""
-   for item in block.items:
-      if isinstance(item, CWPair) and item.key in _ID_KEYS and isinstance(item.value, str):
-          return item.value
-   return None
-
-
-# ── Tokeniser ─────────────────────────────────────────────────────────────────
-
-_PAT = re.compile(
-   r'(?P<STRING>"[^"]*")'  # "quoted string"
-   r'|(?P<DATE>\b\d{1,4}\.\d{1,2}\.\d{1,2}\b)'  # date  (before NUMBER)
-   r'|(?P<NUMBER>-?\d+\.?\d*)'  # integer / float
-   r'|(?P<OP>>=|<=|!=|[=<>])'  # operator
-   r'|(?P<LBRACE>{)'
-   r'|(?P<RBRACE>})'
-   r'|(?P<IDENT>[@\w][.\w:-]*)'  # identifiers, @vars
-   r'|(?P<SKIP>#[^\n]*|[ \t\r\n]+|.)',  # comments, whitespace, junk
-)
+@dataclass(frozen=True, slots=True)
+class CWComment:
+    text: str
+    line: int = 0
+    column: int = 0
 
 
 @dataclass(slots=True)
-class _Tok:
-   kind: str
-   val: str
-   line: int
+class CWRaw:
+    value: CWScalar
+    
+    @property
+    def text(self) -> str:
+        return self.value.text
+    
+    def __str__(self) -> str:
+        return self.value.text
 
 
-def _tokenize(src: str) -> List[_Tok]:
-   toks: List[_Tok] = []
-   line = 1
-   for m in _PAT.finditer(src):
-      kind = m.lastgroup
-      val = m.group()
-      if kind and kind != "SKIP":
-         toks.append(_Tok(kind, val, line))
-      line += val.count("\n")
-   return toks
+@dataclass(slots=True)
+class CWBlock:
+    items: list["CWItem"] = field(default_factory=list)
 
 
-# ── Parser ────────────────────────────────────────────────────────────────────
+@dataclass(slots=True)
+class CWPair:
+    key: CWScalar | str
+    op: str
+    value: "CWValue"
+    line: int = 0
+    column: int = 0
+    
+    def __post_init__(self) -> None:
+        if isinstance(self.key, str):
+            self.key = CWScalar(self.key, ScalarKind.IDENTIFIER,
+                                line=self.line, column=self.column)
+    
+    @property
+    def key_text(self) -> str:
+        assert isinstance(self.key, CWScalar)
+        return self.key.text
+
+
+CWValue: TypeAlias = CWBlock | CWScalar | str
+CWItem: TypeAlias = CWPair | CWRaw | CWBlock | CWComment
+
+_ID_KEYS = frozenset({
+    "id", "name", "token", "tag", "key", "type", "title", "event_id",
+    "class", "category",
+})
+
+
+@dataclass(slots=True)
+class CWFile:
+    path: Path
+    root: CWBlock
+    had_bom: bool = False
+    
+    def top_pairs(self) -> list[CWPair]:
+        return [item for item in self.root.items if isinstance(item, CWPair)]
+    
+    def definitions(self) -> dict[str, CWPair]:
+        """Return compatibility definition keys while preserving ID case."""
+        result: dict[str, CWPair] = {}
+        unnamed: dict[str, int] = defaultdict(int)
+        for pair in self.top_pairs():
+            key = pair.key_text
+            if isinstance(pair.value, CWBlock):
+                identity = inner_id(pair.value)
+                if identity is not None:
+                    definition_key = f"{key}.{identity}"
+                else:
+                    definition_key = f"{key}@{unnamed[key]}"
+                    unnamed[key] += 1
+            else:
+                definition_key = key
+            result[definition_key] = pair
+        return result
+    
+    def definition_names(self) -> set[str]:
+        return set(self.definitions())
+
+
+def scalar_text(value: CWValue) -> str | None:
+    if isinstance(value, CWScalar):
+        return value.text
+    return value if isinstance(value, str) else None
+
+
+def inner_id(block: CWBlock, names: Iterable[str] = _ID_KEYS) -> str | None:
+    allowed = {name.casefold() for name in names}
+    for item in block.items:
+        if (isinstance(item, CWPair)
+                and item.key_text.casefold() in allowed):
+            value = scalar_text(item.value)
+            if value is not None:
+                return value
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _Token:
+    kind: str
+    text: str
+    line: int
+    column: int
+
+
+_NUMBER = re.compile(r"-?(?:\d+\.\d+|\d+)")
+_DATE = re.compile(r"\d{1,4}\.\d{1,2}\.\d{1,2}(?![.\w])")
+_IDENT_END = frozenset(" \t\r\n{}=<>!?#\"")
+_OPERATORS = (">=", "<=", "!=", "==", "?=", "=", ">", "<")
+
+
+def _advance(text: str, line: int, column: int) -> tuple[int, int]:
+    if "\n" not in text:
+        return line, column + len(text)
+    return line + text.count("\n"), len(text.rsplit("\n", 1)[-1]) + 1
+
+
+def _tokenize(source: str, path: Path | None) -> list[_Token]:
+    tokens: list[_Token] = []
+    index = 0
+    line = column = 1
+    length = len(source)
+    while index < length:
+        start_line, start_column = line, column
+        char = source[index]
+        if char.isspace():
+            end = index + 1
+            while end < length and source[end].isspace():
+                end += 1
+            text = source[index:end]
+            line, column = _advance(text, line, column)
+            index = end
+            continue
+        if char == "#":
+            end = source.find("\n", index)
+            if end < 0:
+                end = length
+            text = source[index:end]
+            tokens.append(_Token("COMMENT", text, line, column))
+            line, column = _advance(text, line, column)
+            index = end
+            continue
+        if char == '"':
+            end = index + 1
+            escaped = False
+            while end < length:
+                current = source[end]
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    end += 1
+                    break
+                elif current == "\n":
+                    raise CWParseError("newline in quoted string", line, column, path)
+                end += 1
+            else:
+                raise CWParseError("unterminated quoted string", line, column, path)
+            text = source[index:end]
+            tokens.append(_Token("STRING", text, start_line, start_column))
+            line, column = _advance(text, line, column)
+            index = end
+            continue
+        if source.startswith("@[", index):
+            end = index + 2
+            depth = 1
+            quoted = False
+            escaped = False
+            while end < length and depth:
+                current = source[end]
+                if quoted:
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == '"':
+                        quoted = False
+                elif current == '"':
+                    quoted = True
+                elif current == "[":
+                    depth += 1
+                elif current == "]":
+                    depth -= 1
+                end += 1
+            if depth:
+                raise CWParseError("unterminated metaprogram expression",
+                                   line, column, path)
+            text = source[index:end]
+            tokens.append(_Token("METAPROGRAM", text, start_line, start_column))
+            line, column = _advance(text, line, column)
+            index = end
+            continue
+        if operator := next(
+            (op for op in _OPERATORS if source.startswith(op, index)), None
+        ):
+            tokens.append(_Token("OP", operator, line, column))
+            index += len(operator)
+            column += len(operator)
+            continue
+        if char in "{}":
+            tokens.append(_Token("LBRACE" if char == "{" else "RBRACE",
+                                 char, line, column))
+            index += 1
+            column += 1
+            continue
+        if date_match := _DATE.match(source, index):
+            text = date_match.group()
+            tokens.append(_Token("DATE", text, line, column))
+            index += len(text)
+            column += len(text)
+            continue
+        if number_match := _NUMBER.match(source, index):
+            text = number_match.group()
+            tokens.append(_Token("DECIMAL" if "." in text else "INTEGER",
+                                 text, line, column))
+            index += len(text)
+            column += len(text)
+            continue
+        end = index
+        while (end < length and source[end] not in _IDENT_END
+               and not any(source.startswith(op, end) for op in _OPERATORS)):
+            end += 1
+        if end == index:
+            raise CWParseError(f"unexpected character {char!r}", line, column, path)
+        text = source[index:end]
+        tokens.append(_Token("IDENT", text, line, column))
+        index = end
+        column += len(text)
+    return tokens
+
+def _decode_string(token: _Token, path: Path | None) -> str:
+    try:
+        return codecs.decode(token.text[1:-1], "unicode_escape")
+    except UnicodeDecodeError as error:
+        raise CWParseError("invalid string escape", token.line, token.column,
+                           path) from error
+
+
+def _scalar(token: _Token, path: Path | None = None) -> CWScalar:
+    if token.kind == "STRING":
+        return CWScalar(_decode_string(token, path), ScalarKind.STRING, True,
+                        token.line, token.column)
+    kinds = {
+        "INTEGER": ScalarKind.INTEGER,
+        "DECIMAL": ScalarKind.DECIMAL,
+        "DATE": ScalarKind.DATE,
+        "METAPROGRAM": ScalarKind.METAPROGRAM,
+    }
+    kind = kinds.get(token.kind, ScalarKind.IDENTIFIER)
+    if token.kind == "IDENT" and token.text.casefold() in {"yes", "no"}:
+        kind = ScalarKind.BOOLEAN
+    return CWScalar(token.text, kind, False, token.line, token.column)
+
 
 class _Parser:
-   __slots__ = ("_t", "_i")
-
-   def __init__(self, tokens: List[_Tok]) -> None:
-      self._t = tokens
-      self._i = 0
-
-   def _peek(self) -> _Tok | None:
-      return self._t[self._i] if self._i < len(self._t) else None
-
-   def _eat(self) -> _Tok:
-      tok = self._peek()
-      if tok is None:
-         # Parser logic should prevent this; this is a sanity guard.
-         raise RuntimeError("Attempted to consume token past end of stream")
-      self._i += 1
-      return tok
-
-   def parse_block(self, *, root: bool = False) -> CWBlock:
-      block = CWBlock()
-      while True:
-         tok = self._peek()
-         if tok is None:
-            break
-         if tok.kind == "RBRACE":
-            self._eat()
-            if not root:
-               break
-         elif tok.kind in ("IDENT", "STRING"):
-            nxt = self._t[self._i + 1] if self._i + 1 < len(self._t) else None
-            if nxt is not None and nxt.kind == "OP":
-               key_tok = self._eat()
-               op_tok = self._eat()
-               val = self._parse_value()
-               block.items.append(
-                  CWPair(
-                     key=key_tok.val.strip('"'),
-                     op=op_tok.val,
-                     value=val,
-                     line=key_tok.line,
-                  )
-               )
-            else:
-               block.items.append(CWRaw(tok.val.strip('"')))
-               self._eat()
-         elif tok.kind in ("NUMBER", "DATE"):
-            block.items.append(CWRaw(tok.val))
-            self._eat()
-         elif tok.kind == "LBRACE":
-            self._eat()
-            block.items.append(self.parse_block())
-         else:
-            self._eat()
-      return block
-
-   def _parse_value(self) -> Value:
-      tok = self._peek()
-      if tok is None:
-         return ""
-      if tok.kind == "LBRACE":
-         self._eat()
-         return self.parse_block()
-      self._eat()
-      return tok.val.strip('"')
-
-
-# ── Serialiser  (AST → canonical Clausewitz text) ────────────────────────────
-
-# Strings that must be re-quoted when serialised:
-#   • empty string
-#   • starts with a digit or minus (would be tokenised as NUMBER)
-#   • contains a dot surrounded by digits on both sides (DATE or float)
-#   • contains characters that are OP / structural tokens: = < > ! { } # space
-#   • is a bare Clausewitz boolean/null keyword that was originally quoted
-_NEEDS_QUOTING_RE = re.compile(
-   r"""
-   ^$                       # empty string
-   | ^-?\d                  # starts with digit or minus-digit → NUMBER/float
-   | \d\.\d                 # contains digit.digit → DATE or float
-   | [=<>!{}\#\s]           # structural/operator characters or whitespace
-   """,
-   re.VERBOSE,
-)
-# Reserved Clausewitz keywords that must be quoted when they appear as
-# *string values* (i.e. the parser stored them stripped of their quotes).
-# In practice this only matters when the original file had `key = "yes"`.
-_RESERVED_KEYWORDS = frozenset({"yes", "no", "none"})
+    def __init__(self, tokens: list[_Token], path: Path | None) -> None:
+        self.tokens = tokens
+        self.path = path
+        self.index = 0
+    
+    def peek(self, offset: int = 0) -> _Token | None:
+        index = self.index + offset
+        return self.tokens[index] if index < len(self.tokens) else None
+    
+    def take(self) -> _Token:
+        token = self.peek()
+        if token is None:
+            raise CWParseError("unexpected end of input", 1, 1, self.path)
+        self.index += 1
+        return token
+    
+    def parse(self) -> CWBlock:
+        root = self.parse_block(root=True)
+        if self.peek() is not None:
+            token = self.peek()
+            assert token is not None
+            raise CWParseError("unexpected trailing input", token.line,
+                               token.column, self.path)
+        return root
+    
+    def parse_block(self, root: bool = False,
+                    opener: _Token | None = None) -> CWBlock:
+        items: list[CWItem] = []
+        while (token := self.peek()) is not None:
+            if token.kind == "RBRACE":
+                if root:
+                    raise CWParseError("unmatched closing brace", token.line,
+                                       token.column, self.path)
+                self.take()
+                return CWBlock(items)
+            if token.kind == "COMMENT":
+                self.take()
+                items.append(CWComment(token.text, token.line, token.column))
+                continue
+            if token.kind == "LBRACE":
+                self.take()
+                items.append(self.parse_block(opener=token))
+                continue
+            if token.kind in {"IDENT", "STRING", "INTEGER", "DECIMAL",
+                              "DATE", "METAPROGRAM"}:
+                if self.peek(1) is not None and self.peek(1).kind == "OP":
+                    key_token = self.take()
+                    operator = self.take()
+                    value = self.parse_value(operator)
+                    items.append(CWPair(_scalar(key_token, self.path), operator.text,
+                                        value, key_token.line, key_token.column))
+                else:
+                    items.append(CWRaw(_scalar(self.take(), self.path)))
+                continue
+            raise CWParseError(f"unexpected token {token.text!r}", token.line,
+                               token.column, self.path)
+        if not root:
+            line = opener.line if opener else 1
+            column = opener.column if opener else 1
+            raise CWParseError("unclosed block", line, column, self.path)
+        return CWBlock(items)
+    
+    def parse_value(self, operator: _Token) -> CWValue:
+        while self.peek() is not None and self.peek().kind == "COMMENT":
+            self.take()
+        token = self.peek()
+        if token is None:
+            raise CWParseError(f"missing value after {operator.text!r}",
+                               operator.line, operator.column, self.path)
+        if token.kind == "LBRACE":
+            self.take()
+            return self.parse_block(opener=token)
+        if token.kind in {"IDENT", "STRING", "INTEGER", "DECIMAL", "DATE",
+                          "METAPROGRAM"}:
+            return _scalar(self.take(), self.path)
+        raise CWParseError("expected scalar or block", token.line, token.column,
+                           self.path)
 
 
-def _needs_quoting(s: str) -> bool:
-   """Return True if the string must be wrapped in double-quotes when serialised."""
-   return bool(_NEEDS_QUOTING_RE.search(s)) or s in _RESERVED_KEYWORDS
+def _escape_string(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def unparse(node: Value, depth: int = 0) -> str:
-   """Convert an AST node back to canonical Clausewitz text."""
-   if isinstance(node, str):
-      # Covers both plain str and CWRaw.
-      # CWRaw values come from bare list items (numbers, dates, idents) and
-      # were never quoted in source — never re-quote them.
-      if isinstance(node, CWRaw):
-         return node  # always bare: numbers, dates, bare idents in lists
-      return f'"{node}"' if _needs_quoting(node) else node
-
-   # At this point node must be a CWBlock
-   pad = "\t" * depth
-   lines: List[str] = ["{"]
-   for item in node.items:
-      if isinstance(item, CWPair):
-         lines.append(
-            f"{pad}\t{item.key} {item.op} "
-            f"{unparse(item.value, depth + 1)}"
-         )
-      elif isinstance(item, CWBlock):
-         nested = unparse(item, depth)
-         lines.extend(f"{pad}\t{line}" for line in nested.splitlines())
-      else:
-         # item is CWRaw (a str subclass) — always emit bare
-         lines.append(f"{pad}\t{item}")
-   lines.append(f"{pad}}}")
-   return "\n".join(lines)
+def unparse_scalar(value: CWScalar | str) -> str:
+    if isinstance(value, str):
+        value = CWScalar(value)
+    if value.quoted or value.kind is ScalarKind.STRING:
+        return f'"{_escape_string(value.text)}"'
+    return value.text
 
 
-def unparse_pair(pair: CWPair) -> str:
-   """Return canonical text for a single CWPair (used in diffs)."""
-   return f"{pair.key} {pair.op} {unparse(pair.value)}"
+def unparse(node: CWValue | CWRaw | CWComment, depth: int = 0) -> str:
+    if isinstance(node, (CWScalar, str)):
+        return unparse_scalar(node)
+    if isinstance(node, CWRaw):
+        return unparse_scalar(node.value)
+    if isinstance(node, CWComment):
+        return node.text
+    if not isinstance(node, CWBlock):
+        raise TypeError(type(node))
+    pad = "\t" * depth
+    lines = ["{"]
+    for item in node.items:
+        if isinstance(item, CWPair):
+            lines.append(f"{pad}\t{unparse_pair(item, depth + 1)}")
+        elif isinstance(item, CWBlock):
+            nested = unparse(item, depth + 1)
+            lines.extend(f"{pad}\t{line}" for line in nested.splitlines())
+        else:
+            lines.append(f"{pad}\t{unparse(item, depth + 1)}")
+    lines.append(f"{pad}}}")
+    return "\n".join(lines)
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def unparse_pair(pair: CWPair, depth: int = 0) -> str:
+    return (f"{unparse_scalar(pair.key)} {pair.op} "
+            f"{unparse(pair.value, depth)}")
+
 
 def parse_text(text: str, path: Path | None = None) -> CWFile:
-   """Parse Clausewitz script from a string."""
-   tokens = _tokenize(text)
-   root = _Parser(tokens).parse_block(root=True)
-   return CWFile(path=path or Path(""), root=root)
+    had_bom = text.startswith("\ufeff")
+    if had_bom:
+        text = text[1:]
+    return CWFile(path or Path(""), _Parser(_tokenize(text, path), path).parse(),
+                  had_bom)
 
 
 def parse_file(path: Path) -> CWFile:
-   """Read and parse a Clausewitz script file (handles UTF-8 BOM)."""
-   text = path.read_text(encoding="utf-8-sig", errors="replace")
-   return parse_text(text, path)
+    return parse_text(path.read_text(encoding="utf-8-sig"), path)

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "game": "stellaris",
+  "gameVersion": "bootstrap",
+  "configRevision": "bootstrap-profile-replace-with-cwtools-export",
+  "description": "Bootstrap profile. Replace with deterministic CWTools/cwtools-stellaris-config output.",
+  "booleanOperators": {
+    "and": {"kind": "all", "min": 0},
+    "or": {"kind": "any", "min": 0},
+    "not": {"kind": "not", "min": 1, "max": 1},
+    "nand": {"kind": "not-all", "min": 0},
+    "nor": {"kind": "not-any", "min": 0}
+  },
+  "keywords": [
+    "trigger", "limit", "potential", "allow", "possible", "abort_trigger",
+    "immediate", "effect", "after", "option", "modifier", "hidden_effect",
+    "if", "else_if", "else", "while", "random_list"
+  ],
+  "contexts": [
+    {"path": "common/scripted_triggers", "role": "TRIGGER"},
+    {"path": "common/scripted_effects", "role": "EFFECT"},
+    {"path": "common/static_modifiers", "role": "MODIFIER_MAP"},
+    {"path": "common/on_actions", "role": "ORDERED_SEQUENCE"},
+    {"path": "events", "role": "ORDERED_SEQUENCE"}
+  ],
+  "definitionTypes": [
+    {"name": "scripted_trigger", "paths": ["common/scripted_triggers"]},
+    {"name": "scripted_effect", "paths": ["common/scripted_effects"]},
+    {"name": "trait", "paths": ["common/traits"]},
+    {"name": "technology", "paths": ["common/technology", "common/technologies"]},
+    {"name": "building", "paths": ["common/buildings"]},
+    {"name": "static_modifier", "paths": ["common/static_modifiers"]},
+    {"name": "country_event", "paths": ["events"], "rootKeys": ["country_event"], "nameField": "id"},
+    {"name": "planet_event", "paths": ["events"], "rootKeys": ["planet_event"], "nameField": "id"},
+    {"name": "fleet_event", "paths": ["events"], "rootKeys": ["fleet_event"], "nameField": "id"},
+    {"name": "ship_event", "paths": ["events"], "rootKeys": ["ship_event"], "nameField": "id"}
+  ]
+}
